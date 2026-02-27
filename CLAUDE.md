@@ -13,6 +13,7 @@ Source footage is intentionally left ungraded — no archival color correction �
 ```
 pipeline/
 ├── config.py              # Config dataclass — paths, ffmpeg settings, video defaults
+├── recipe.py              # Recipe data model — BrainWipeRecipe, sources, steps, lanes
 ├── ffmpeg.py              # All video I/O: probe, read_frames, FrameWriter, extract, concat
 ├── gl.py                  # moderngl standalone context, FBO ping-pong, quad geometry
 ├── isf.py                 # ISF v2 parser + GLSL translator
@@ -27,7 +28,8 @@ pipeline/
 └── flows/                 # Prefect @flow compositions (example pipelines)
     ├── examples.py        # 10 flows: cut-shuffle-shader, deep-color, shader-lab, crush-lab, etc.
     ├── stooges.py         # Multi-channel CRT TV content (crush sandwich + parallel)
-    └── brain_wipe.py      # Warp/distortion chains + long-form brain wipe renders
+    ├── brain_wipe.py      # Meta-flow + warp chains + long-form brain wipe renders
+    └── compositing_lab.py # Random layer compositing experiments
 ```
 
 Tasks are atomic Prefect `@task` functions. Flows are `@flow` functions that compose tasks into pipelines. New workflows should follow the same pattern: write tasks for new primitives, compose them in flows.
@@ -87,6 +89,8 @@ Available in `composite.py`: `normal`, `add`, `multiply`, `screen`, `overlay`, `
 
 **New ISF built-in**: Add the replacement to `_translate_isf_to_glsl()` in `isf.py`.
 
+**New recipe step type** (from labs): Add a dataclass to `recipe.py`, add it to the `Step` union type alias, add a `case` branch in `_submit_step()` in `brain_wipe.py`. The step dataclass should have fields matching the corresponding task's parameters.
+
 ## Glitch Tasks
 
 `pipeline/tasks/glitch.py` contains codec-abuse effects that exploit encoder behavior rather than processing frames directly.
@@ -98,24 +102,57 @@ Available in `composite.py`: `normal`, `add`, `multiply`, `screen`, `overlay`, `
 - `crush` parameter: 0.0–1.0 maps to QP 30–51 (libx264) or q:v 10–31 (mpeg2/mpeg4).
 - `downscale` parameter: shrinks before crushing, nearest-neighbor upscale baked into the dirty pass. Produces bigger blocks.
 
+## Recipe System
+
+`pipeline/recipe.py` — declarative data model for describing full render pipelines.
+
+A `BrainWipeRecipe` describes: **lanes** (parallel processing streams), **compositing** (how lanes combine), and **post-processing** (final steps). Each lane has a **source** (footage, generator, static, solid), a **recipe** (ordered list of processing steps), and **sequencing** (shuffle, concat, optional static interleaving).
+
+**Step types**: `CrushStep`, `ShaderStep`, `NormalizeStep`. Adding new step types from labs: add a dataclass to `recipe.py`, add to the `Step` union, add a `case` branch in `_submit_step()` in `brain_wipe.py`.
+
+**Source types**: `FootageSource` (random or scene-based segmentation), `GeneratorSource` (generator shaders + optional warps), `StaticSource`, `SolidSource`.
+
+**Composite types**: `BlendComposite`, `MaskedComposite`, `RandomComposite` (not yet implemented — use `compositing_lab` directly).
+
+**Recipe builders** construct common patterns:
+- `crush_sandwich_recipe(src)` — crush → shaders → crush → shaders → normalize
+- `stooges_recipe(src, segment_counts=[8,10,12])` — multi-channel CRT content
+- `generator_render_recipe()` — generator shaders + warp chains, no source needed
+- `composite_recipe(src)` — two lanes composited via mask
+
+**Recipe utilities**: `print_recipe()` pretty-prints, `hash_recipe()` returns 8-char hex hash for output naming.
+
 ## Brain Wipe Flows
 
-`pipeline/flows/brain_wipe.py` — two flows for applying warp and distortion shaders, with category-aware shader filtering to keep warp/brain-wipe shaders separate from glitch/color shaders.
+`pipeline/flows/brain_wipe.py` — three flows:
 
-**`warp_chain`**: Apply a chain of warp shaders to source footage. Single input → single output. Filters to `["Warp", "Brain Wipe"]` categories by default. Supports explicit shader paths or random selection. Optionally normalizes output levels.
+**`brain_wipe`** (meta-flow): Takes a `BrainWipeRecipe` and executes it. Materialises sources, processes segments through recipe steps concurrently (Prefect future chaining), sequences per lane, composites lanes, applies post-processing. Can express all other complex flows as recipes.
+
+```python
+from pipeline.recipe import crush_sandwich_recipe
+from pipeline.flows.brain_wipe import brain_wipe
+brain_wipe(crush_sandwich_recipe(Path("source/footage.mp4"), seed=42))
+```
+
+```
+python -m pipeline.flows.brain_wipe brain-wipe --preset crush-sandwich source.mp4 --seed 42
+python -m pipeline.flows.brain_wipe brain-wipe --preset stooges source.mp4 --segment-counts 8,10,12
+python -m pipeline.flows.brain_wipe brain-wipe --preset generator-render -n 12 --seed 42
+```
+
+**`warp_chain`**: Apply a chain of warp shaders to source footage. Single input → single output. Filters to `["Warp", "Brain Wipe"]` categories by default.
 
 ```
 python -m pipeline.flows.brain_wipe warp-chain source/footage.mp4 --n-shaders 2 --seed 7
 ```
 
-**`brain_wipe_render`**: Pre-render a long-form brain wipe sequence. Pulls N random segments from source, processes each through a random warp chain, shuffles and concatenates. With `--use-generators`, prepends a generator shader (plasma/tunnel/chladni) that replaces video content before warping. Outputs per-segment previews to `output/brain_wipe_segments/`.
+**`brain_wipe_render`**: Pre-render a long-form brain wipe sequence via generator shaders. No source footage needed.
 
 ```
-python -m pipeline.flows.brain_wipe brain-wipe-render source/footage.mp4 \
-    -n 12 --segment-dur 20 --n-warp-shaders 2 --use-generators --seed 42
+python -m pipeline.flows.brain_wipe brain-wipe-render -n 12 --segment-dur 20 --seed 42
 ```
 
-Both flows use `ConcurrentTaskRunner(max_workers=4)` for parallelism and are registered in `examples.py`.
+All flows use `ConcurrentTaskRunner(max_workers=4)` for parallelism.
 
 ## Stooges Flow
 

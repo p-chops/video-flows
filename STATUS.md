@@ -144,13 +144,17 @@ ISF `"TYPE": "bool"` and `"event"` inputs become `uniform float` in translated G
 
 Had comment lines before the ISF `/*{` header. The ISF parser uses `re.match` (anchored to start of file), so the comments prevented parsing. Fixed by removing the leading comments.
 
-## Compositing Lab: Dense Random Compositing
+## Compositing Lab: Brain Wipe Compositing (Working, Producing Usable Output)
 
-`pipeline/flows/compositing_lab.py` — generates N independent composite samples, each built from a random recipe of source layers and compositing operations. Runs samples concurrently as Prefect subflows via ThreadPoolExecutor for full UI observability.
+`pipeline/flows/compositing_lab.py` — composites brain wipe renders onto each other. No source footage needed — all visual content is synthesized by generator shaders, optionally warped and crushed, then layered through random compositing operations. Runs samples concurrently as Prefect subflows via ThreadPoolExecutor for full UI observability.
+
+Results from v4/v5 runs are already usable as stream content.
 
 ### Recipe structure per sample
 
-1. **Layer generation** (3–6 layers): raw footage segment, shader-processed segment, generator shader render, TV static, or solid colour
+1. **Layer generation** (3–6 layers, weighted selection):
+   - **brain_wipe** (weight 5) — generator shader + 0–N warp shaders, with 25% chance of per-layer bitrate crush (0.4–1.0). Crush happens before compositing so artifacts become material that keying/masking/blending operates on.
+   - **solid** (weight 1) — random solid colour
 2. **Layer pre-processing** (50% chance per layer): warp through 1–2 spatial shaders (from `shaders/` spatial subset + brain-wipe warp collection)
 3. **Compositing operations** (2–5 ops, weighted random selection):
    - **blend** — random blend mode (screen/add/multiply/overlay/difference/softlight), random opacity 0.2–0.8
@@ -159,20 +163,38 @@ Had comment lines before the ISF `/*{` header. The ISF parser uses `re.match` (a
    - **chromakey** — HSV colour removal using random hue target, revealing base through transparent regions
    - **pip** — picture-in-picture at random position and scale
    - **multi_pip** — 2–3 scaled overlays placed onto a single base
-4. **Post-processing** (50% chance each): random shader, bitrate crush 0.7–1.0, normalize levels
+4. **Post-processing** (50% chance each): random glitch/color shader, normalize levels
 
-### Operation weights
+### Design decisions
 
-Self-keyed (4) and chromakey (3) are weighted higher than blend (3), masked (2), pip (2), multi_pip (2) — transparency-based operations are the core capability for dense layered compositions.
+- **Source footage dropped** — all layers are brain wipe renders (generators + warps). No `src` parameter.
+- **Per-layer crush** instead of post-composite crush. 25% chance, range 0.4–1.0. Crushed layers interact with clean layers through compositing ops rather than flattening everything at the end.
+- **Static dropped** — TV noise was reading as gray in the composites, not contributing.
+- **Brain wipe utilities exposed** — `pick_shader_stack`, `LEVEL_PARAMS`, `randomise_params`, `print_stack` made public in `brain_wipe.py` for reuse across flows.
 
 ### CLI
 
 ```
-python -m pipeline.flows.compositing_lab input/footage.mp4 \
-    -n 8 --seed 42 --segment-dur 10 \
-    --shader-dir shaders --brain-wipe-dir brain-wipe-shaders \
+python -m pipeline.flows.compositing_lab \
+    -n 10 --seed 42 --segment-dur 10 \
+    --brain-wipe-dir brain-wipe-shaders \
+    --shader-dir shaders \
+    --min-warps 0 --max-warps 2 \
     -o output/comp_lab
 ```
+
+### Output runs
+
+- `output/comp_bw_v2/` — 5 samples, seed 100 (first brain-wipe-only run)
+- `output/comp_bw_v3/` — 10 samples, seed 200 (post-crush still at end)
+- `output/comp_bw_v4/` — 10 samples, seed 300 (per-layer crush, no end crush)
+- `output/comp_bw_v5/` — 5 samples, seed 400 (static removed, current recipe)
+
+### Potential improvements
+
+- **Parallelize layer generation** — layers within each sample are built sequentially. Could use `.submit()` with `ConcurrentTaskRunner` to render all 3–6 layers concurrently, significantly reducing per-sample time.
+- **Tune layer count / op count** — current 3–6 layers and 2–5 ops are reasonable defaults but could be CLI-configurable.
+- **Crush sandwich variant** — per-layer crush before compositing works well; could also try crush → warp → crush (stooges sandwich pattern) within a brain wipe layer for deeper artifact texture.
 
 ### Tasks added
 
