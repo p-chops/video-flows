@@ -81,9 +81,36 @@ class NormalizeStep:
     black_point: float = 0.01
     white_point: float = 0.99
 
-# Future step types from labs — add dataclasses here, add to Step union below.
+@dataclass
+class ScrubStep:
+    """Temporal scrub — smooth random playhead wandering."""
+    smoothness: float = 2.0
+    intensity: float = 0.5
 
-Step = CrushStep | ShaderStep | NormalizeStep
+@dataclass
+class DriftStep:
+    """Drift loop — short looping window that drifts through the source."""
+    loop_dur: float = 0.5
+    drift: Optional[float] = None   # None = auto (+-10% of loop length)
+
+@dataclass
+class PingPongStep:
+    """Ping-pong — forward-backward breathing repetition."""
+    window: float = 0.5
+
+@dataclass
+class EchoStep:
+    """Temporal echo / trails — ghostly motion trails or distinct echoes."""
+    delay: float = 0.0    # 0 = motion blur, >0 = distinct echoes
+    trail: float = 0.8    # echo strength / feedback
+
+@dataclass
+class PatchStep:
+    """Temporal patchwork — random rectangular patches from different moments."""
+    patch_min: float = 0.05
+    patch_max: float = 0.4
+
+Step = CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep | PingPongStep | EchoStep | PatchStep
 
 
 # ─── Lanes ────────────────────────────────────────────────────────────────────
@@ -156,6 +183,18 @@ def _step_label(step: Step) -> str:
             return f"shaders ×{n}{cat_tag}"
         case NormalizeStep(black_point=bp, white_point=wp):
             return f"normalize [{bp:.2f}–{wp:.2f}]"
+        case ScrubStep(smoothness=s, intensity=i):
+            return f"scrub (smooth={s:.1f}, intensity={i:.2f})"
+        case DriftStep(loop_dur=ld, drift=d):
+            drift_str = f"{d:.2f}s" if d is not None else "auto"
+            return f"drift (loop={ld:.2f}s, drift={drift_str})"
+        case PingPongStep(window=w):
+            return f"pingpong (window={w:.2f}s)"
+        case EchoStep(delay=d, trail=t):
+            mode = "blur" if d <= 0 else f"delay={d:.2f}s"
+            return f"echo ({mode}, trail={t:.2f})"
+        case PatchStep(patch_min=mn, patch_max=mx):
+            return f"patch ({mn:.0%}–{mx:.0%})"
         case _:
             return type(step).__name__
 
@@ -229,6 +268,18 @@ def _recipe_to_hashable(recipe: BrainWipeRecipe) -> str:
                         "n": s.n_shaders, "cats": s.categories}
             case NormalizeStep():
                 return {"type": "normalize", "bp": s.black_point, "wp": s.white_point}
+            case ScrubStep():
+                return {"type": "scrub", "smoothness": s.smoothness,
+                        "intensity": s.intensity}
+            case DriftStep():
+                return {"type": "drift", "loop_dur": s.loop_dur, "drift": s.drift}
+            case PingPongStep():
+                return {"type": "pingpong", "window": s.window}
+            case EchoStep():
+                return {"type": "echo", "delay": s.delay, "trail": s.trail}
+            case PatchStep():
+                return {"type": "patch", "patch_min": s.patch_min,
+                        "patch_max": s.patch_max}
             case _:
                 return {"type": type(s).__name__}
 

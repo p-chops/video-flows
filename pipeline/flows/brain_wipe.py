@@ -71,6 +71,11 @@ from ..recipe import (
     CrushStep,
     ShaderStep,
     NormalizeStep,
+    ScrubStep,
+    DriftStep,
+    PingPongStep,
+    EchoStep,
+    PatchStep,
     BlendComposite,
     MaskedComposite,
     RandomComposite,
@@ -83,6 +88,8 @@ from ..tasks import (
     blend_layers,
     concat_clips,
     detect_cuts,
+    drift_loop,
+    echo_trail,
     edge_mask,
     generate_solid,
     generate_static,
@@ -90,9 +97,12 @@ from ..tasks import (
     masked_composite,
     motion_mask,
     normalize_levels,
+    ping_pong,
     random_segments,
     segment_at_cuts,
     shuffle_clips,
+    time_patch,
+    time_scrub,
 )
 
 
@@ -565,6 +575,30 @@ def _submit_step(
         case NormalizeStep(black_point=bp, white_point=wp):
             return normalize_levels.submit(
                 src, dst, black_point=bp, white_point=wp, cfg=cfg,
+            )
+        case ScrubStep(smoothness=smoothness, intensity=intensity):
+            return time_scrub.submit(
+                src, dst, smoothness=smoothness, intensity=intensity,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case DriftStep(loop_dur=loop_dur, drift=drift):
+            return drift_loop.submit(
+                src, dst, loop_dur=loop_dur, drift=drift,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case PingPongStep(window=window):
+            return ping_pong.submit(
+                src, dst, window=window,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case EchoStep(delay=delay, trail=trail):
+            return echo_trail.submit(
+                src, dst, delay=delay, trail=trail, cfg=cfg,
+            )
+        case PatchStep(patch_min=patch_min, patch_max=patch_max):
+            return time_patch.submit(
+                src, dst, patch_min=patch_min, patch_max=patch_max,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
             )
         case _:
             raise ValueError(f"Unknown step type: {type(step).__name__}")
