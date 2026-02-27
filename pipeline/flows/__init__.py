@@ -15,3 +15,4 @@ from .brain_wipe import (
     pick_shader_stack, LEVEL_PARAMS,
 )
 from .compositing_lab import compositing_lab
+from .time_lab import time_lab, time_lab_scrub, time_lab_drift, time_lab_pingpong, time_lab_echo, time_lab_patch
