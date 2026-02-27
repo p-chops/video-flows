@@ -1,7 +1,7 @@
 """
 Brain Wipe flows — apply warp and distortion shaders to video.
 
-Two flows:
+Three flows:
 
   warp_chain         Apply a chain of warp shaders to source footage.
                      Category-aware: filters library to "Warp" / "Brain Wipe"
@@ -12,8 +12,13 @@ Two flows:
                      synthesize content from scratch — no source footage needed.
                      Optional warp shaders can be chained after each generator.
 
-Both flows accept an explicit shader_categories list for filtering, or fall
-back to ["Warp", "Brain Wipe"] by default. Pass shader_categories=None to
+  brain_wipe         Recipe-driven meta-flow. Takes a BrainWipeRecipe dataclass
+                     that declaratively describes lanes, per-segment processing
+                     steps, sequencing, and compositing. Subsumes all other flows
+                     — any complex pipeline can be expressed as a recipe.
+
+Both legacy flows accept an explicit shader_categories list for filtering, or
+fall back to ["Warp", "Brain Wipe"] by default. Pass shader_categories=None to
 use the full library (same behaviour as shader_lab / crush_lab).
 
 Usage (Python):
@@ -30,15 +35,24 @@ Usage (Python):
         seed=42,
     )
 
+    # Meta-flow via recipe:
+    from pipeline.recipe import crush_sandwich_recipe
+    from pipeline.flows.brain_wipe import brain_wipe
+
+    recipe = crush_sandwich_recipe(Path("source/footage.mp4"), seed=42)
+    brain_wipe(recipe)
+
 CLI:
     python -m pipeline.flows.brain_wipe warp-chain source/footage.mp4 --n-shaders 2
     python -m pipeline.flows.brain_wipe brain-wipe-render -n 12 --seed 42
+    python -m pipeline.flows.brain_wipe brain-wipe --preset crush-sandwich source.mp4
 """
 
 from __future__ import annotations
 
 import hashlib
 import random
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -48,12 +62,37 @@ from prefect.task_runners import ConcurrentTaskRunner
 from ..config import Config
 from ..ffmpeg import probe
 from ..isf import ISFShader, load_shader_dir
+from ..recipe import (
+    BrainWipeRecipe,
+    FootageSource,
+    GeneratorSource,
+    StaticSource,
+    SolidSource,
+    CrushStep,
+    ShaderStep,
+    NormalizeStep,
+    BlendComposite,
+    MaskedComposite,
+    RandomComposite,
+    print_recipe,
+    hash_recipe,
+)
 from ..tasks import (
     apply_shader_stack,
+    bitrate_crush,
+    blend_layers,
     concat_clips,
-    shuffle_clips,
-    normalize_levels,
+    detect_cuts,
+    edge_mask,
     generate_solid,
+    generate_static,
+    luma_mask,
+    masked_composite,
+    motion_mask,
+    normalize_levels,
+    random_segments,
+    segment_at_cuts,
+    shuffle_clips,
 )
 
 
@@ -253,7 +292,6 @@ def warp_chain(
         print("Normalizing levels...")
         normalize_levels(work_path, out, cfg=c)
     else:
-        import shutil
         shutil.copy2(work_path, out)
 
     print(f"\nOutput: {out}")
@@ -457,7 +495,6 @@ def brain_wipe_render(
             nf.result()
 
     # Copy segment previews
-    import shutil
     for i, (seg_idx, tag, _, _) in enumerate(recipes):
         preview = seg_out_dir / f"seg_{seg_idx:03d}_{tag}.mp4"
         shutil.copy2(normed_paths[i], preview)
@@ -473,6 +510,450 @@ def brain_wipe_render(
 
     print(f"\n{len(normed_paths)} segments → {out}")
     return out
+
+
+# ─── Flow 3: brain_wipe (recipe-driven meta-flow) ────────────────────────────
+
+def _resolve_shaders_for_step(
+    step: ShaderStep,
+    rng: random.Random,
+    shader_cache: dict[str, dict[str, ISFShader]],
+    recipe: BrainWipeRecipe,
+    cfg: Config,
+) -> tuple[list[Path], dict[str, dict[str, float]]]:
+    """Resolve shader paths + param overrides for a ShaderStep."""
+    if step.shader_paths:
+        return step.shader_paths, {}
+
+    s_dir = step.shader_dir or recipe.shader_dir or cfg.shader_dir
+    key = str(s_dir)
+    if key not in shader_cache:
+        shader_cache[key] = load_shader_dir(s_dir)
+
+    pool = shader_cache[key]
+    if step.categories:
+        pool = filter_shaders(pool, categories=step.categories)
+
+    if not pool:
+        pool = shader_cache[key]
+
+    return pick_shader_stack(pool, step.n_shaders, rng, pin_defaults=LEVEL_PARAMS)
+
+
+def _submit_step(
+    step,
+    src,
+    dst: Path,
+    rng: random.Random,
+    shader_cache: dict[str, dict[str, ISFShader]],
+    recipe: BrainWipeRecipe,
+    cfg: Config,
+):
+    """Submit a single processing step, returning a Prefect future."""
+    match step:
+        case CrushStep(crush=crush, codec=codec, downscale=downscale):
+            return bitrate_crush.submit(
+                src, dst, crush=crush, codec=codec, downscale=downscale, cfg=cfg,
+            )
+        case ShaderStep():
+            paths, overrides = _resolve_shaders_for_step(
+                step, rng, shader_cache, recipe, cfg,
+            )
+            return apply_shader_stack.submit(
+                src, dst, paths, param_overrides=overrides, cfg=cfg,
+            )
+        case NormalizeStep(black_point=bp, white_point=wp):
+            return normalize_levels.submit(
+                src, dst, black_point=bp, white_point=wp, cfg=cfg,
+            )
+        case _:
+            raise ValueError(f"Unknown step type: {type(step).__name__}")
+
+
+def _materialize_generator_source(
+    source: GeneratorSource,
+    n_segments: int,
+    lane_idx: int,
+    rng: random.Random,
+    shader_cache: dict[str, dict[str, ISFShader]],
+    recipe: BrainWipeRecipe,
+    cfg: Config,
+) -> list:
+    """Generate segments via generator shaders. Returns list of futures."""
+    work = cfg.work_dir / f"bw_lane_{lane_idx:02d}"
+    work.mkdir(parents=True, exist_ok=True)
+
+    bw_dir = recipe.brain_wipe_dir
+    key = str(bw_dir)
+    if key not in shader_cache:
+        shader_cache[key] = load_shader_dir(bw_dir)
+
+    bw_shaders = shader_cache[key]
+    generators = filter_shaders(bw_shaders, has_image_input=False)
+    warpers = filter_shaders(
+        bw_shaders,
+        categories=source.warp_categories,
+        has_image_input=True,
+    )
+
+    if not generators:
+        raise ValueError(
+            f"No generator shaders found in {bw_dir}. "
+            f"Generator shaders (no inputImage) are required."
+        )
+
+    futures = []
+    for i in range(n_segments):
+        seg_rng = random.Random(rng.randint(0, 2 ** 31))
+
+        # Solid placeholder
+        solid_path = work / f"solid_{i:03d}.mp4"
+        solid_f = generate_solid.submit(
+            solid_path, source.duration,
+            width=recipe.width, height=recipe.height,
+            fps=recipe.fps, cfg=cfg,
+        )
+
+        # Generator + warps
+        gen_paths, gen_ov = pick_shader_stack(
+            generators, 1, seg_rng, pin_defaults=LEVEL_PARAMS,
+        )
+        chain_paths = list(gen_paths)
+        chain_ov = dict(gen_ov)
+
+        if source.n_warps > 0 and warpers:
+            w_paths, w_ov = pick_shader_stack(
+                warpers, source.n_warps, seg_rng, pin_defaults=LEVEL_PARAMS,
+            )
+            chain_paths.extend(w_paths)
+            chain_ov.update(w_ov)
+
+        tag = hashlib.sha1(
+            ";".join(p.stem for p in chain_paths).encode()
+        ).hexdigest()[:8]
+
+        print(f"    seg {i:03d} [{tag}]:")
+        print_stack(chain_paths, chain_ov, indent="      ")
+
+        rendered_path = work / f"gen_{i:03d}_{tag}.mp4"
+        rendered_f = apply_shader_stack.submit(
+            solid_f, rendered_path, chain_paths,
+            param_overrides=chain_ov, cfg=cfg,
+        )
+        futures.append(rendered_f)
+
+    return futures
+
+
+def _materialize_source(
+    lane,
+    lane_idx: int,
+    rng: random.Random,
+    shader_cache: dict[str, dict[str, ISFShader]],
+    recipe: BrainWipeRecipe,
+    cfg: Config,
+) -> list:
+    """
+    Materialise segment sources for a lane.
+    Returns a list of Paths or Prefect futures (for generator sources).
+    """
+    source = lane.source
+    work = cfg.work_dir / f"bw_lane_{lane_idx:02d}"
+    work.mkdir(parents=True, exist_ok=True)
+
+    match source:
+        case FootageSource(path=path, method=method):
+            if method == "scene":
+                cuts = detect_cuts(path, cfg=cfg)
+                segments = segment_at_cuts(
+                    path, cuts, output_dir=work / "segments", cfg=cfg,
+                )
+                if lane.n_segments > 0 and lane.n_segments < len(segments):
+                    segments = rng.sample(segments, lane.n_segments)
+                print(f"    {len(segments)} scene segments from {path.name}")
+                return segments
+            else:
+                segments = random_segments(
+                    path, lane.n_segments,
+                    min_dur=source.min_dur, max_dur=source.max_dur,
+                    output_dir=work / "segments", cfg=cfg,
+                )
+                print(f"    {len(segments)} random segments from {path.name}")
+                return segments
+
+        case GeneratorSource():
+            print(f"    generating {lane.n_segments} segments "
+                  f"({source.duration:.0f}s, {source.n_warps} warps)")
+            return _materialize_generator_source(
+                source, lane.n_segments, lane_idx, rng,
+                shader_cache, recipe, cfg,
+            )
+
+        case StaticSource(duration=dur):
+            paths = []
+            for i in range(lane.n_segments):
+                p = work / f"static_{i:03d}.mp4"
+                generate_static(p, dur, width=recipe.width,
+                                height=recipe.height, fps=recipe.fps, cfg=cfg)
+                paths.append(p)
+            print(f"    {lane.n_segments} static segments ({dur:.0f}s)")
+            return paths
+
+        case SolidSource(duration=dur, color=color):
+            paths = []
+            for i in range(lane.n_segments):
+                p = work / f"solid_{i:03d}.mp4"
+                generate_solid(p, dur, color=color, width=recipe.width,
+                               height=recipe.height, fps=recipe.fps, cfg=cfg)
+                paths.append(p)
+            print(f"    {lane.n_segments} solid segments ({dur:.0f}s)")
+            return paths
+
+        case _:
+            raise ValueError(f"Unknown source type: {type(source).__name__}")
+
+
+def _process_lane(
+    lane,
+    lane_idx: int,
+    source_items: list,
+    rng: random.Random,
+    shader_cache: dict[str, dict[str, ISFShader]],
+    recipe: BrainWipeRecipe,
+    cfg: Config,
+) -> list[Path]:
+    """
+    Process all segments in a lane through the recipe steps.
+    Returns list of final output paths.
+    """
+    if not lane.recipe:
+        # No processing — resolve source futures and return
+        return [
+            item.result() if hasattr(item, 'result') else item
+            for item in source_items
+        ]
+
+    work = cfg.work_dir / f"bw_lane_{lane_idx:02d}"
+    work.mkdir(parents=True, exist_ok=True)
+
+    final_futures = []
+    for seg_idx, seg_source in enumerate(source_items):
+        seg_rng = random.Random(rng.randint(0, 2 ** 31))
+        current = seg_source  # Path or future
+
+        for step_idx, step in enumerate(lane.recipe):
+            dst = work / f"seg_{seg_idx:03d}_s{step_idx}.mp4"
+            current = _submit_step(
+                step, current, dst, seg_rng, shader_cache, recipe, cfg,
+            )
+
+        final_futures.append(current)
+
+    # Wait for all segment pipelines to complete
+    results = []
+    for f in final_futures:
+        results.append(f.result() if hasattr(f, 'result') else f)
+    return results
+
+
+def _sequence_lane(
+    lane,
+    lane_idx: int,
+    processed: list[Path],
+    rng: random.Random,
+    recipe: BrainWipeRecipe,
+    cfg: Config,
+) -> Path:
+    """Sequence processed segments into a single output per lane."""
+    out = cfg.work_dir / f"bw_lane_{lane_idx:02d}_seq.mp4"
+
+    # Interleave static if requested
+    if lane.static_gap > 0:
+        # Match static resolution to actual segment resolution (not recipe defaults)
+        seg_info = probe(processed[0], cfg)
+        static_path = cfg.work_dir / f"bw_lane_{lane_idx:02d}_static.mp4"
+        generate_static(
+            static_path, lane.static_gap,
+            width=seg_info.width, height=seg_info.height,
+            fps=seg_info.fps, cfg=cfg,
+        )
+        pieces = []
+        for i, seg in enumerate(processed):
+            pieces.append(seg)
+            if i < len(processed) - 1:
+                pieces.append(static_path)
+        processed = pieces
+
+    if lane.sequencing == "shuffle":
+        shuffle_clips(processed, out, seed=rng.randint(0, 2 ** 31), cfg=cfg)
+    else:
+        concat_clips(processed, out, cfg=cfg)
+
+    print(f"    lane {lane_idx}: {len(processed)} clips → {out.name}")
+    return out
+
+
+def _composite_lanes(
+    lane_paths: list[Path],
+    recipe: BrainWipeRecipe,
+    cfg: Config,
+) -> Path:
+    """Composite multiple lane outputs according to the recipe's CompositeSpec."""
+    out = cfg.work_dir / "bw_composited.mp4"
+
+    match recipe.composite:
+        case BlendComposite(mode=mode, opacity=opacity):
+            # Fold: blend lane0+lane1, then result+lane2, etc.
+            current = lane_paths[0]
+            for i, overlay in enumerate(lane_paths[1:], 1):
+                dst = cfg.work_dir / f"bw_blend_{i}.mp4"
+                blend_layers(current, overlay, dst,
+                             mode=mode, opacity=opacity, cfg=cfg)
+                current = dst
+            shutil.copy2(current, out)
+
+        case MaskedComposite(mask_type=mask_type, mask_params=params):
+            # Generate mask from base lane, composite overlay onto base
+            mask_path = cfg.work_dir / "bw_composite_mask.mp4"
+            mask_fns = {
+                "luma": luma_mask,
+                "edge": edge_mask,
+                "motion": motion_mask,
+            }
+            mask_fn = mask_fns.get(mask_type)
+            if mask_fn is None:
+                raise ValueError(
+                    f"Unsupported mask type for compositing: {mask_type}. "
+                    f"Available: {list(mask_fns.keys())}"
+                )
+            mask_fn(lane_paths[0], mask_path, **params, cfg=cfg)
+
+            # Fold: composite lane0+lane1 via mask, then result+lane2, etc.
+            current = lane_paths[0]
+            for i, overlay in enumerate(lane_paths[1:], 1):
+                dst = cfg.work_dir / f"bw_masked_{i}.mp4"
+                masked_composite(current, overlay, mask_path, dst, cfg=cfg)
+                current = dst
+            shutil.copy2(current, out)
+
+        case RandomComposite():
+            raise NotImplementedError(
+                "RandomComposite requires compositing_lab integration — "
+                "use compositing_lab directly for now."
+            )
+
+        case _:
+            raise ValueError(
+                f"Unknown composite type: {type(recipe.composite).__name__}"
+            )
+
+    print(f"  composited {len(lane_paths)} lanes → {out.name}")
+    return out
+
+
+@flow(name="brain-wipe", log_prints=True,
+      task_runner=ConcurrentTaskRunner(max_workers=4))
+def brain_wipe(
+    recipe: BrainWipeRecipe,
+    output: Optional[Path] = None,
+    cfg: Optional[Config] = None,
+) -> Path | list[Path]:
+    """
+    Recipe-driven meta-flow for the brain wipe pipeline.
+
+    Takes a BrainWipeRecipe that declaratively describes:
+      - Lanes: parallel processing streams with source, recipe, sequencing
+      - Compositing: optional blending/masking of lane outputs
+      - Post-processing: final steps after compositing
+
+    Returns a single Path (composited or single-lane) or list[Path]
+    (multi-lane, no compositing).
+
+    Build recipes directly or use the helpers in pipeline.recipe:
+      crush_sandwich_recipe, stooges_recipe, generator_render_recipe,
+      composite_recipe.
+    """
+    c = cfg or Config()
+    c.ensure_dirs()
+    rng = random.Random(recipe.seed)
+    shader_cache: dict[str, dict[str, ISFShader]] = {}
+
+    recipe_tag = hash_recipe(recipe)
+
+    # ── Print recipe ──────────────────────────────────────────────────────
+    print_recipe(recipe)
+    print(f"  recipe hash: {recipe_tag}\n")
+
+    # ── Process each lane ─────────────────────────────────────────────────
+
+    lane_outputs: list[Path] = []
+
+    for lane_idx, lane in enumerate(recipe.lanes):
+        lane_rng = random.Random(rng.randint(0, 2 ** 31))
+
+        print(f"─── Lane {lane_idx} ───")
+
+        # Materialise source segments
+        source_items = _materialize_source(
+            lane, lane_idx, lane_rng, shader_cache, recipe, c,
+        )
+
+        # Process through recipe steps
+        processed = _process_lane(
+            lane, lane_idx, source_items, lane_rng,
+            shader_cache, recipe, c,
+        )
+
+        # Sequence into single output
+        sequenced = _sequence_lane(
+            lane, lane_idx, processed, lane_rng, recipe, c,
+        )
+        lane_outputs.append(sequenced)
+
+    # ── Composite lanes ───────────────────────────────────────────────────
+
+    if recipe.composite is not None and len(lane_outputs) > 1:
+        result = _composite_lanes(lane_outputs, recipe, c)
+    elif len(lane_outputs) == 1:
+        result = lane_outputs[0]
+    else:
+        # Multi-lane, no composite — apply post per lane, return list
+        final_lanes = []
+        for i, lane_path in enumerate(lane_outputs):
+            current = lane_path
+            if recipe.post:
+                for step_idx, step in enumerate(recipe.post):
+                    dst = c.work_dir / f"bw_post_ch{i:02d}_s{step_idx}.mp4"
+                    post_rng = random.Random(rng.randint(0, 2 ** 31))
+                    f = _submit_step(
+                        step, current, dst, post_rng, shader_cache, recipe, c,
+                    )
+                    current = f.result() if hasattr(f, 'result') else f
+            out_path = c.output_dir / f"brain_wipe_{recipe_tag}_ch{i:02d}.mp4"
+            shutil.copy2(current, out_path)
+            final_lanes.append(out_path)
+        print(f"\n{len(final_lanes)} channel outputs in {c.output_dir}")
+        return final_lanes
+
+    # ── Post-processing ───────────────────────────────────────────────────
+
+    if recipe.post:
+        current = result
+        for step_idx, step in enumerate(recipe.post):
+            dst = c.work_dir / f"bw_post_s{step_idx}.mp4"
+            post_rng = random.Random(rng.randint(0, 2 ** 31))
+            f = _submit_step(
+                step, current, dst, post_rng, shader_cache, recipe, c,
+            )
+            current = f.result() if hasattr(f, 'result') else f
+        result = current
+
+    # ── Final output ──────────────────────────────────────────────────────
+
+    final = output or c.output_dir / f"brain_wipe_{recipe_tag}.mp4"
+    shutil.copy2(result, final)
+    print(f"\nOutput: {final}")
+    return final
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -535,6 +1016,34 @@ def _cli():
     p.add_argument("--output-dir", type=Path, default=None,
                    help="Directory for per-segment previews")
 
+    # ── brain-wipe (recipe meta-flow) ──
+    p = sub.add_parser("brain-wipe",
+                       help="Recipe-driven meta-flow (use --preset for quick start)")
+    p.add_argument("src", type=Path, nargs="?", default=None,
+                   help="Source footage (required for footage-based presets)")
+    p.add_argument("--preset", type=str, default="crush-sandwich",
+                   choices=["crush-sandwich", "stooges", "generator-render"],
+                   help="Recipe preset (default: crush-sandwich)")
+    p.add_argument("-n", "--n-segments", type=int, default=8)
+    p.add_argument("--segment-dur", type=float, default=20.0,
+                   help="Segment duration for generator preset (default: 20)")
+    p.add_argument("--n-shaders", type=int, default=3,
+                   help="Shaders per stack (default: 3)")
+    p.add_argument("--crush", type=float, default=0.95,
+                   help="Crush amount (default: 0.95)")
+    p.add_argument("--segment-counts", type=str, default=None,
+                   help="Comma-separated segment counts for stooges (e.g. 8,10,12)")
+    p.add_argument("--static-gap", type=float, default=0.3,
+                   help="Static gap duration for stooges (default: 0.3)")
+    p.add_argument("--n-warps", type=int, default=2,
+                   help="Warp shaders for generator preset (default: 2)")
+    p.add_argument("--brain-wipe-dir", type=Path,
+                   default=Path("brain-wipe-shaders"))
+    p.add_argument("--no-normalize", dest="normalize", action="store_false",
+                   default=True)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("-o", "--output", type=Path, default=None)
+
     args = parser.parse_args()
     cfg = Config()
     cfg.ensure_dirs()
@@ -573,6 +1082,60 @@ def _cli():
             cfg=cfg,
         )
         print(f"\nOutput: {out}")
+
+    elif args.flow == "brain-wipe":
+        from ..recipe import (
+            crush_sandwich_recipe,
+            stooges_recipe,
+            generator_render_recipe,
+        )
+
+        preset = args.preset
+        if preset == "crush-sandwich":
+            if args.src is None:
+                parser.error("crush-sandwich preset requires source footage")
+            r = crush_sandwich_recipe(
+                args.src,
+                n_segments=args.n_segments,
+                crush=args.crush,
+                n_shaders=args.n_shaders,
+                normalize=args.normalize,
+                seed=args.seed,
+            )
+        elif preset == "stooges":
+            if args.src is None:
+                parser.error("stooges preset requires source footage")
+            counts = (
+                [int(x) for x in args.segment_counts.split(",")]
+                if args.segment_counts
+                else args.n_segments
+            )
+            r = stooges_recipe(
+                args.src,
+                segment_counts=counts,
+                crush=args.crush,
+                n_shaders=args.n_shaders,
+                static_gap=args.static_gap,
+                seed=args.seed,
+            )
+        elif preset == "generator-render":
+            r = generator_render_recipe(
+                n_segments=args.n_segments,
+                segment_dur=args.segment_dur,
+                max_warps=args.n_warps,
+                normalize=args.normalize,
+                seed=args.seed,
+                brain_wipe_dir=args.brain_wipe_dir,
+            )
+        else:
+            parser.error(f"Unknown preset: {preset}")
+
+        out = brain_wipe(r, output=args.output, cfg=cfg)
+        if isinstance(out, list):
+            for p in out:
+                print(f"Output: {p}")
+        else:
+            print(f"\nOutput: {out}")
 
 
 if __name__ == "__main__":

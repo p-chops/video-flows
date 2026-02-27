@@ -11,7 +11,7 @@ from .examples import (
 )
 from .stooges import stooges_channels
 from .brain_wipe import (
-    warp_chain, brain_wipe_render, filter_shaders,
+    brain_wipe, warp_chain, brain_wipe_render, filter_shaders,
     pick_shader_stack, LEVEL_PARAMS,
 )
 from .compositing_lab import compositing_lab
