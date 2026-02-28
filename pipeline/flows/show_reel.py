@@ -16,7 +16,10 @@ from prefect import flow
 from prefect.task_runners import ConcurrentTaskRunner
 
 from ..config import Config
-from ..recipe import random_recipe, hash_recipe, print_recipe
+from ..recipe import (
+    random_recipe, hash_recipe, print_recipe,
+    GeneratorSource, StaticSource,
+)
 from ..tasks.transition import transition_sequence
 from .brain_wipe import brain_wipe
 
@@ -59,6 +62,14 @@ def show_reel(
     work = c.work_dir / reel_tag
     work.mkdir(parents=True, exist_ok=True)
 
+    # When source footage is provided, match its resolution so all shows
+    # (footage and generator) share the same dimensions for transitions
+    if src:
+        from ..ffmpeg import probe as ffprobe
+        src_info = ffprobe(src, c)
+        width = src_info.width
+        height = src_info.height
+
     print(f"═══ Show Reel (seed={reel_seed}) ═══")
     print(f"    {n_shows} shows, {min_dur}–{max_dur}s each")
     print(f"    complexity {min_complexity}–{max_complexity}")
@@ -69,6 +80,16 @@ def show_reel(
     print(f"    {width}×{height} @ 30fps")
     print(f"    random transitions ({transition_dur}s)\n")
 
+    # Pre-assign footage vs generator per show — guarantees the ratio
+    # instead of independent coin flips which can streak badly at small N
+    if src:
+        n_footage = round(n_shows * footage_ratio)
+        n_footage = max(1, min(n_footage, n_shows - 1))  # at least 1 of each
+        show_is_footage = [True] * n_footage + [False] * (n_shows - n_footage)
+        rng.shuffle(show_is_footage)
+    else:
+        show_is_footage = [False] * n_shows
+
     # Generate all recipes upfront, then render sequentially as subflows
     show_configs = []
     for i in range(n_shows):
@@ -76,15 +97,18 @@ def show_reel(
         complexity = rng.uniform(min_complexity, max_complexity)
         dur = rng.uniform(min_dur, max_dur)
 
-        # Per-show coin flip: footage or generator
-        use_footage = src and rng.random() < footage_ratio
+        use_footage = show_is_footage[i]
+
+        # Footage needs higher complexity to look interesting — at low
+        # complexity it's barely processed (1 mild crush + 1 shader).
+        # Floor footage at 0.4 so it always gets a proper crush sandwich.
+        show_complexity = max(complexity, 0.4) if use_footage else complexity
 
         recipe = random_recipe(
             src=src if use_footage else None,
-            complexity=complexity,
+            complexity=show_complexity,
             target_dur=dur,
-            use_generators=not use_footage,
-            n_lanes=1,
+            use_generators=True,
             n_segments=1,
             use_transitions=False,
             seed=show_seed,
@@ -92,14 +116,32 @@ def show_reel(
         recipe.width = width
         recipe.height = height
 
+        # Reject StaticSource in any lane — TV noise is boring. Replace
+        # with GeneratorSource. Also clamp durations to the show's target.
+        for lane in recipe.lanes:
+            if isinstance(lane.source, StaticSource):
+                lane.source = GeneratorSource(
+                    min_dur=lane.source.min_dur,
+                    max_dur=lane.source.max_dur,
+                    n_warps=rng.randint(0, 2),
+                )
+            lane.source.max_dur = min(lane.source.max_dur, dur)
+            lane.source.min_dur = min(lane.source.min_dur, dur)
+
         show_tag = hash_recipe(recipe)
         show_path = work / f"show_{i:03d}_{show_tag}.mp4"
 
         kind = "footage" if use_footage else "generator"
-        print(f"  show {i:03d} (seed={show_seed}, {kind}, complexity={complexity:.2f}, "
-              f"{dur:.1f}s):")
-        for step in recipe.lanes[0].recipe:
-            print(f"    {step}")
+        n_lanes = len(recipe.lanes)
+        print(f"  show {i:03d} (seed={show_seed}, {kind}, complexity={show_complexity:.2f}, "
+              f"{dur:.1f}s, {n_lanes} lane{'s' if n_lanes > 1 else ''}):")
+        for li, lane in enumerate(recipe.lanes):
+            if n_lanes > 1:
+                src_name = type(lane.source).__name__
+                print(f"    lane {li} ({src_name}):")
+            for step in lane.recipe:
+                prefix = "      " if n_lanes > 1 else "    "
+                print(f"{prefix}{step}")
 
         show_configs.append((recipe, show_path))
 
