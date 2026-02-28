@@ -149,9 +149,27 @@ class SlipStep:
     max_slip: float = 0.5        # fraction of total frames
     axis: str = "horizontal"
 
+@dataclass
+class MirrorStep:
+    """Mirror video along an axis."""
+    axis: str = "horizontal"     # "horizontal" or "vertical"
+
+@dataclass
+class ZoomStep:
+    """Crop-zoom into a region of the frame."""
+    factor: float = 1.5          # 1.0 = no zoom, 2.0 = 2x
+    center_x: float = 0.5       # 0.0–1.0
+    center_y: float = 0.5       # 0.0–1.0
+
+@dataclass
+class InvertStep:
+    """Invert video colours (negative)."""
+    pass
+
 Step = (CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep
         | PingPongStep | EchoStep | PatchStep | SlitScanStep | TemporalTileStep
-        | SmearStep | BloomStep | StackStep | SlipStep)
+        | SmearStep | BloomStep | StackStep | SlipStep
+        | MirrorStep | ZoomStep | InvertStep)
 
 
 # ─── Transitions ──────────────────────────────────────────────────────────────
@@ -267,6 +285,12 @@ def _step_label(step: Step) -> str:
             return f"stack ({m} ×{w})"
         case SlipStep(n_bands=nb, max_slip=ms, axis=a):
             return f"slip ({nb} bands, {a}, slip={ms:.2f})"
+        case MirrorStep(axis=a):
+            return f"mirror ({a})"
+        case ZoomStep(factor=f, center_x=cx, center_y=cy):
+            return f"zoom ({f:.1f}x @ {cx:.2f},{cy:.2f})"
+        case InvertStep():
+            return "invert"
         case _:
             return type(step).__name__
 
@@ -468,6 +492,13 @@ def _step_to_dict(s: Step) -> dict:
         case SlipStep():
             return {"type": "slip", "n_bands": s.n_bands,
                     "max_slip": s.max_slip, "axis": s.axis}
+        case MirrorStep():
+            return {"type": "mirror", "axis": s.axis}
+        case ZoomStep():
+            return {"type": "zoom", "factor": s.factor,
+                    "center_x": s.center_x, "center_y": s.center_y}
+        case InvertStep():
+            return {"type": "invert"}
         case _:
             raise ValueError(f"Unknown step type: {type(s).__name__}")
 
@@ -513,6 +544,14 @@ def _step_from_dict(d: dict) -> Step:
         return SlipStep(n_bands=d.get("n_bands", 8),
                         max_slip=d.get("max_slip", 0.5),
                         axis=d.get("axis", "horizontal"))
+    elif t == "mirror":
+        return MirrorStep(axis=d.get("axis", "horizontal"))
+    elif t == "zoom":
+        return ZoomStep(factor=d.get("factor", 1.5),
+                        center_x=d.get("center_x", 0.5),
+                        center_y=d.get("center_y", 0.5))
+    elif t == "invert":
+        return InvertStep()
     else:
         raise ValueError(f"Unknown step type: {t}")
 
@@ -1357,6 +1396,15 @@ _STEP_POOL: list[tuple[type, int]] = [
     (PingPongStep, 2),
     (EchoStep, 2),
     (PatchStep, 2),
+    (SlitScanStep, 1),
+    (TemporalTileStep, 1),
+    (SmearStep, 1),
+    (BloomStep, 1),
+    (StackStep, 1),
+    (SlipStep, 1),
+    (MirrorStep, 2),
+    (ZoomStep, 2),
+    (InvertStep, 1),
 ]
 
 _TIME_STEPS = (ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
@@ -1430,9 +1478,44 @@ def _random_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
     elif cls is EchoStep:
         delay = 0.0 if rng.random() < 0.4 else rng.uniform(0.02, 0.3)
         return EchoStep(delay=delay, trail=rng.uniform(0.5, 0.9))
-    else:  # PatchStep
+    elif cls is PatchStep:
         mn = rng.uniform(0.03, 0.15)
         return PatchStep(patch_min=mn, patch_max=rng.uniform(mn + 0.1, 0.5))
+    elif cls is SlitScanStep:
+        return SlitScanStep(
+            axis=rng.choice(["horizontal", "vertical"]),
+            scan_speed=rng.uniform(0.3, 1.0 + complexity),
+        )
+    elif cls is TemporalTileStep:
+        return TemporalTileStep(
+            grid=rng.choice([3, 4, 5, 6]),
+            offset_scale=rng.uniform(0.3, 1.0),
+        )
+    elif cls is SmearStep:
+        return SmearStep(threshold=rng.uniform(0.05, 0.15 + complexity * 0.2))
+    elif cls is BloomStep:
+        return BloomStep(sensitivity=rng.uniform(0.05, 0.15 + complexity * 0.1))
+    elif cls is StackStep:
+        return StackStep(
+            window=rng.choice([4, 6, 8, 12, 16]),
+            mode=rng.choice(["mean", "mean", "max", "min"]),
+        )
+    elif cls is SlipStep:
+        return SlipStep(
+            n_bands=rng.choice([4, 6, 8, 12]),
+            max_slip=rng.uniform(0.2, 0.5 + complexity * 0.3),
+            axis=rng.choice(["horizontal", "vertical"]),
+        )
+    elif cls is MirrorStep:
+        return MirrorStep(axis=rng.choice(["horizontal", "vertical"]))
+    elif cls is ZoomStep:
+        return ZoomStep(
+            factor=rng.uniform(1.2, 2.0 + complexity),
+            center_x=rng.uniform(0.2, 0.8),
+            center_y=rng.uniform(0.2, 0.8),
+        )
+    else:  # InvertStep
+        return InvertStep()
 
 
 def _random_steps(rng: _random_mod.Random, n_steps: int, complexity: float = 0.5) -> list[Step]:

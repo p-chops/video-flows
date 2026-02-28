@@ -26,7 +26,7 @@ pipeline/
 │   ├── mask.py            # Luma, edge (Canny), motion, chroma, gradient masks
 │   ├── color.py           # normalize_levels, auto_levels — level stretch + gamma correction
 │   ├── glitch.py          # bitrate_crush — codec-based compression artifacts
-│   ├── time.py            # Temporal effects: scrub, drift, ping-pong, echo, patch
+│   ├── time.py            # Temporal effects: scrub, drift, ping-pong, echo, patch, slit_scan, temporal_tile, smear, bloom, frame_stack, slip
 │   └── transition.py      # Transitions: crossfade, luma_wipe, whip_pan, static_burst, flash
 └── flows/                 # Prefect @flow compositions (example pipelines)
     ├── examples.py        # 10 flows: cut-shuffle-shader, deep-color, shader-lab, crush-lab, etc.
@@ -138,13 +138,31 @@ Blend modes use ffmpeg filter names mapped via `FFMPEG_BLEND_MODES` dict. Adding
 - `crush` parameter: 0.0–1.0 maps to QP 30–51 (libx264) or q:v 10–31 (mpeg2/mpeg4).
 - `downscale` parameter: shrinks before crushing, nearest-neighbor upscale baked into the dirty pass. Produces bigger blocks.
 
+## Time Effects
+
+`pipeline/tasks/time.py` — temporal manipulation effects. Flows + CLI in `pipeline/flows/time_lab.py`. All effects: same duration in, same duration out.
+
+| Effect | Task | Key params | Memory model |
+|--------|------|-----------|--------------|
+| scrub | `time_scrub` | `smoothness`, `intensity`, `seed` | All frames in RAM |
+| drift | `drift_loop` | `loop_dur`, `drift`, `seed` | All frames in RAM |
+| pingpong | `ping_pong` | `window`, `seed` | All frames in RAM |
+| echo | `echo_trail` | `delay`, `trail` | Ring buffer (delay_frames) |
+| patch | `time_patch` | `patch_min`, `patch_max`, `seed` | Streaming (1 canvas) |
+| slit_scan | `slit_scan` | `axis`, `scan_speed`, `seed` | All frames in RAM |
+| temporal_tile | `temporal_tile` | `grid`, `offset_scale`, `seed` | All frames in RAM |
+| smear | `smear` | `threshold` | Streaming (1 canvas) |
+| bloom | `bloom` | `sensitivity` | Streaming |
+| frame_stack | `frame_stack` | `window`, `mode` | Ring buffer |
+| slip | `slip` | `n_bands`, `max_slip`, `axis`, `seed` | All frames in RAM |
+
 ## Recipe System
 
 `pipeline/recipe.py` — declarative data model for describing full render pipelines.
 
 A `BrainWipeRecipe` describes: **lanes** (parallel processing streams), **compositing** (how lanes combine), and **post-processing** (final steps). Each lane has a **source** (footage, generator, static, solid), a **recipe** (ordered list of processing steps), and **sequencing** (shuffle, concat, optional static interleaving).
 
-**Step types**: `CrushStep`, `ShaderStep`, `NormalizeStep`, `ScrubStep`, `DriftStep`, `PingPongStep`, `EchoStep`, `PatchStep`. Adding new step types from labs: add a dataclass to `recipe.py`, add to the `Step` union, add a `case` branch in `_submit_step()` in `brain_wipe.py`.
+**Step types**: `CrushStep`, `ShaderStep`, `NormalizeStep`, `ScrubStep`, `DriftStep`, `PingPongStep`, `EchoStep`, `PatchStep`, `SlitScanStep`, `TemporalTileStep`, `SmearStep`, `BloomStep`, `StackStep`, `SlipStep`. Adding new step types from labs: add a dataclass to `recipe.py`, add to the `Step` union, add a `case` branch in `_submit_step()` in `brain_wipe.py`.
 
 **Source types**: `FootageSource` (random or scene-based segmentation), `GeneratorSource` (generator shaders + optional warps), `StaticSource`, `SolidSource`.
 
@@ -165,10 +183,14 @@ A `BrainWipeRecipe` describes: **lanes** (parallel processing streams), **compos
 - `generator_stooges_recipe()` — stooges but all-generator, no source (alien TV station)
 - `gradient_dissolve_recipe(src)` — footage + generator via gradient mask (portal effect)
 - `accretion_recipe(src)` — 4 lanes at escalating destruction, screen-blended (geological layering)
+- `stutter_recipe(src)` — rapid short segments, hard cuts, channel-surfing
+- `echo_chamber_recipe(src)` — stacked echo effects at increasing delays
+- `warp_focus_recipe()` — generator + heavy warps, minimal processing
+- `edge_poster_recipe(src)` — posterize + edge_glow, footage or generators
 
 **Procedural recipe generator** (`random_recipe()`): picks a structural **archetype**, then fills in with complexity-scaled parameters.
 
-8 archetypes:
+12 archetypes:
 | Archetype | Structure |
 |-----------|-----------|
 | `crush_sandwich` | Alternating crush/shader pairs (C-S-C-S), optional codec cascade |
@@ -179,6 +201,10 @@ A `BrainWipeRecipe` describes: **lanes** (parallel processing streams), **compos
 | `palimpsest` | 2 lanes, same source, contrasting treatments (crush vs time), masked composite |
 | `hybrid` | Footage + generator lane, masked composite |
 | `grab_bag` | Original behavior — independent step draws from pool |
+| `stutter` | Rapid-fire short segments, hard cuts |
+| `echo_chamber` | Stacked echo effects at increasing delays |
+| `warp_focus` | Generator with heavy warp chain, minimal post |
+| `edge_poster` | Posterize + edge_glow pairing, single or two-lane |
 
 Auto-selected from eligible set based on context (src, n_lanes, use_generators). Force via `archetype="deep_time"` etc. Complexity still scales all parameters within the chosen archetype.
 
@@ -221,6 +247,12 @@ python -m pipeline.flows.brain_wipe warp-chain source/footage.mp4 --n-shaders 2 
 
 ```
 python -m pipeline.flows.brain_wipe brain-wipe-render -n 12 --segment-dur 20 --seed 42
+```
+
+**Batch generation**: Generate multiple random show reels for curation, each with a unique seed.
+
+```
+python -m pipeline.flows.show_reel batch 10 -n 8 --src source.mp4 --footage-ratio 0.5 --min-complexity 0.5 --max-complexity 0.9
 ```
 
 All flows use `ConcurrentTaskRunner(max_workers=4)` for parallelism.

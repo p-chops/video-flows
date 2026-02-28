@@ -22,3 +22,4 @@ from .time import (
 from .transition import (
     crossfade, luma_wipe, whip_pan, static_burst, flash, transition_sequence,
 )
+from .transform import mirror, zoom, invert

@@ -82,6 +82,9 @@ from ..recipe import (
     BloomStep,
     StackStep,
     SlipStep,
+    MirrorStep,
+    ZoomStep,
+    InvertStep,
     BlendComposite,
     MaskedComposite,
     RandomComposite,
@@ -117,6 +120,9 @@ from ..tasks import (
     bloom,
     frame_stack,
     slip,
+    mirror,
+    zoom,
+    invert,
 )
 
 
@@ -641,6 +647,14 @@ def _submit_step(
                 src, dst, n_bands=n_bands, max_slip=max_slip, axis=axis,
                 seed=rng.randint(0, 2 ** 31), cfg=cfg,
             )
+        case MirrorStep(axis=axis):
+            return mirror.submit(src, dst, axis=axis, cfg=cfg)
+        case ZoomStep(factor=factor, center_x=cx, center_y=cy):
+            return zoom.submit(
+                src, dst, factor=factor, center_x=cx, center_y=cy, cfg=cfg,
+            )
+        case InvertStep():
+            return invert.submit(src, dst, cfg=cfg)
         case _:
             raise ValueError(f"Unknown step type: {type(step).__name__}")
 

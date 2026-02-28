@@ -36,6 +36,18 @@ from ..tasks.transition import transition_sequence
 from .brain_wipe import brain_wipe
 
 
+def _resolve_src(rng: random.Random, src: Optional[Path]) -> Optional[Path]:
+    """If src is a directory, pick a random .mp4 from it. Otherwise return as-is."""
+    if src is None:
+        return None
+    if src.is_dir():
+        files = sorted(src.glob("*.mp4"))
+        if not files:
+            raise ValueError(f"No .mp4 files found in {src}")
+        return rng.choice(files)
+    return src
+
+
 # ── Plan phase ───────────────────────────────────────────────────────────────
 
 def _plan_shows(
@@ -61,8 +73,11 @@ def _plan_shows(
     reel_seed = seed or rng.randint(0, 2**31)
 
     # When source footage is provided, match its resolution so all shows
-    # (footage and generator) share the same dimensions for transitions
-    if src:
+    # (footage and generator) share the same dimensions for transitions.
+    # If src is a directory, keep the explicit width/height (default 1280×720)
+    # since files may have mixed resolutions.
+    is_src_dir = src is not None and src.is_dir()
+    if src and not is_src_dir:
         from ..ffmpeg import probe as ffprobe
         src_info = ffprobe(src, c)
         width = src_info.width
@@ -72,7 +87,11 @@ def _plan_shows(
     print(f"    {n_shows} shows, {min_dur}–{max_dur}s each")
     print(f"    complexity {min_complexity}–{max_complexity}")
     if src:
-        print(f"    source: {src.name} ({footage_ratio:.0%} footage)")
+        if is_src_dir:
+            n_files = len(list(src.glob("*.mp4")))
+            print(f"    source: {src.name}/ ({n_files} files, {footage_ratio:.0%} footage)")
+        else:
+            print(f"    source: {src.name} ({footage_ratio:.0%} footage)")
     else:
         print(f"    generators only (no source footage)")
     print(f"    {width}×{height} @ 30fps")
@@ -107,8 +126,10 @@ def _plan_shows(
         else:
             show_complexity = complexity
 
+        show_src = _resolve_src(rng, src) if use_footage else None
+
         recipe = random_recipe(
-            src=src if use_footage else None,
+            src=show_src,
             complexity=show_complexity,
             target_dur=dur,
             use_generators=None if use_footage else True,
@@ -132,8 +153,9 @@ def _plan_shows(
             lane.source.min_dur = min(lane.source.min_dur, dur)
 
         kind = "footage" if use_footage else "generator"
+        src_tag = f" [{show_src.name}]" if (use_footage and is_src_dir and show_src) else ""
         n_lanes = len(recipe.lanes)
-        print(f"  show {i:03d} (seed={show_seed}, {kind}, complexity={show_complexity:.2f}, "
+        print(f"  show {i:03d} (seed={show_seed}, {kind}{src_tag}, complexity={show_complexity:.2f}, "
               f"{dur:.1f}s, {n_lanes} lane{'s' if n_lanes > 1 else ''}):")
         for li, lane in enumerate(recipe.lanes):
             if n_lanes > 1:
