@@ -4,10 +4,22 @@ Show reel flow — channel-surfing through heterogeneous generator "shows".
 Each show is a short (5–10s) generator clip rendered at a random complexity
 level, so some are raw warped generators and others have crush, shaders,
 time effects, etc. Shows are joined with random per-pair transitions.
+
+Supports a human-in-the-loop workflow via CLI subcommands:
+
+    # Preview recipes and save a manifest (no rendering)
+    python -m pipeline.flows.show_reel plan -n 8 --seed 2222 ...
+
+    # Edit the manifest, then render it
+    python -m pipeline.flows.show_reel render work/reel_2222_manifest.json
+
+    # One-shot: plan + render (the original behaviour)
+    python -m pipeline.flows.show_reel run -n 8 --seed 2222 ...
 """
 
 from __future__ import annotations
 
+import json
 import random
 from pathlib import Path
 from typing import Optional
@@ -17,16 +29,16 @@ from prefect.task_runners import ConcurrentTaskRunner
 
 from ..config import Config
 from ..recipe import (
-    random_recipe, hash_recipe, print_recipe,
+    random_recipe, hash_recipe, recipe_to_dict, recipe_from_dict,
     GeneratorSource, StaticSource,
 )
 from ..tasks.transition import transition_sequence
 from .brain_wipe import brain_wipe
 
 
-@flow(name="show-reel", log_prints=True,
-      task_runner=ConcurrentTaskRunner(max_workers=4))
-def show_reel(
+# ── Plan phase ───────────────────────────────────────────────────────────────
+
+def _plan_shows(
     n_shows: int = 20,
     min_dur: float = 5.0,
     max_dur: float = 10.0,
@@ -40,27 +52,13 @@ def show_reel(
     seed: Optional[int] = None,
     output: Optional[Path] = None,
     cfg: Optional[Config] = None,
-) -> Path:
-    """
-    Generate a show reel: N short clips at varying complexity,
-    joined with random transitions.
-
-    n_shows:        number of shows (segments)
-    min_dur/max_dur: duration range for each show (seconds)
-    min_complexity:  lowest complexity for a show
-    max_complexity:  highest complexity for a show
-    transition_dur:  transition duration between shows (seconds)
-    src:            optional source footage — when provided, some shows use it
-    footage_ratio:  probability each show uses footage vs generator (0.0–1.0)
-    """
+) -> dict:
+    """Generate show recipes and return a manifest dict (no rendering)."""
     c = cfg or Config()
     c.ensure_dirs()
     rng = random.Random(seed)
 
     reel_seed = seed or rng.randint(0, 2**31)
-    reel_tag = f"reel_{reel_seed}"
-    work = c.work_dir / reel_tag
-    work.mkdir(parents=True, exist_ok=True)
 
     # When source footage is provided, match its resolution so all shows
     # (footage and generator) share the same dimensions for transitions
@@ -84,14 +82,16 @@ def show_reel(
     # instead of independent coin flips which can streak badly at small N
     if src:
         n_footage = round(n_shows * footage_ratio)
-        n_footage = max(1, min(n_footage, n_shows - 1))  # at least 1 of each
+        # At extremes (0.0 or 1.0) honour the request exactly;
+        # otherwise guarantee at least 1 of each kind.
+        if footage_ratio > 0.0 and footage_ratio < 1.0:
+            n_footage = max(1, min(n_footage, n_shows - 1))
         show_is_footage = [True] * n_footage + [False] * (n_shows - n_footage)
         rng.shuffle(show_is_footage)
     else:
         show_is_footage = [False] * n_shows
 
-    # Generate all recipes upfront, then render sequentially as subflows
-    show_configs = []
+    shows = []
     for i in range(n_shows):
         show_seed = rng.randint(0, 2**31)
         complexity = rng.uniform(min_complexity, max_complexity)
@@ -99,16 +99,19 @@ def show_reel(
 
         use_footage = show_is_footage[i]
 
-        # Footage needs higher complexity to look interesting — at low
-        # complexity it's barely processed (1 mild crush + 1 shader).
-        # Floor footage at 0.4 so it always gets a proper crush sandwich.
-        show_complexity = max(complexity, 0.4) if use_footage else complexity
+        # Footage complexity band: floor 0.4 (enough processing to be
+        # interesting) and cap 0.55 (preserve recognisable source).
+        # Generators can go as high as the user wants.
+        if use_footage:
+            show_complexity = max(0.4, min(0.55, complexity))
+        else:
+            show_complexity = complexity
 
         recipe = random_recipe(
             src=src if use_footage else None,
             complexity=show_complexity,
             target_dur=dur,
-            use_generators=True,
+            use_generators=None if use_footage else True,
             n_segments=1,
             use_transitions=False,
             seed=show_seed,
@@ -128,9 +131,6 @@ def show_reel(
             lane.source.max_dur = min(lane.source.max_dur, dur)
             lane.source.min_dur = min(lane.source.min_dur, dur)
 
-        show_tag = hash_recipe(recipe)
-        show_path = work / f"show_{i:03d}_{show_tag}.mp4"
-
         kind = "footage" if use_footage else "generator"
         n_lanes = len(recipe.lanes)
         print(f"  show {i:03d} (seed={show_seed}, {kind}, complexity={show_complexity:.2f}, "
@@ -143,19 +143,70 @@ def show_reel(
                 prefix = "      " if n_lanes > 1 else "    "
                 print(f"{prefix}{step}")
 
-        show_configs.append((recipe, show_path))
+        shows.append({
+            "index": i,
+            "seed": show_seed,
+            "kind": kind,
+            "complexity": round(show_complexity, 4),
+            "duration": round(dur, 2),
+            "recipe": recipe_to_dict(recipe),
+        })
 
-    # Render each show as a subflow
+    out_path = output or c.output_dir / f"show_reel_{reel_seed}.mp4"
+
+    manifest = {
+        "seed": reel_seed,
+        "transition_dur": transition_dur,
+        "width": width,
+        "height": height,
+        "output": str(out_path),
+        "shows": shows,
+    }
+    return manifest
+
+
+# ── Render phase ─────────────────────────────────────────────────────────────
+
+@flow(name="show-reel-render", log_prints=True,
+      task_runner=ConcurrentTaskRunner(max_workers=4))
+def show_reel_render(
+    manifest: dict,
+    output: Optional[Path] = None,
+    cfg: Optional[Config] = None,
+    cleanup: bool = True,
+) -> Path:
+    """Render a show reel from a manifest dict (or loaded JSON)."""
+    c = cfg or Config()
+    c.ensure_dirs()
+
+    reel_seed = manifest["seed"]
+    transition_dur = manifest["transition_dur"]
+    shows = manifest["shows"]
+    out = output or Path(manifest["output"])
+
+    reel_tag = f"reel_{reel_seed}"
+    work = c.work_dir / reel_tag
+    work.mkdir(parents=True, exist_ok=True)
+
+    rng = random.Random(reel_seed)
+
+    print(f"═══ Rendering Show Reel (seed={reel_seed}, {len(shows)} shows) ═══")
+
     show_clips = []
-    for i, (recipe, show_path) in enumerate(show_configs):
-        print(f"\n  rendering show {i:03d}...")
+    for show in shows:
+        idx = show["index"]
+        recipe = recipe_from_dict(show["recipe"])
+        show_tag = hash_recipe(recipe)
+        show_path = work / f"show_{idx:03d}_{show_tag}.mp4"
+
+        print(f"\n  rendering show {idx:03d} "
+              f"(seed={show['seed']}, {show['kind']}, "
+              f"complexity={show['complexity']:.2f}, {show['duration']:.1f}s)...")
         result = brain_wipe(recipe, output=show_path, cfg=c, cleanup=True)
         show_clips.append(result)
 
-    print(f"\n  all {n_shows} shows rendered")
+    print(f"\n  all {len(shows)} shows rendered")
 
-    # Join with random transitions
-    out = output or c.output_dir / f"show_reel_{reel_seed}.mp4"
     print(f"\n  joining {len(show_clips)} shows with random transitions...")
     transition_sequence(
         show_clips, out,
@@ -166,24 +217,70 @@ def show_reel(
     )
 
     # Cleanup show clips from work dir
-    import shutil
-    if work.exists():
-        total_mb = sum(
-            f.stat().st_size for f in work.rglob("*") if f.is_file()
-        ) / (1024 * 1024)
-        n_files = sum(1 for f in work.rglob("*") if f.is_file())
-        shutil.rmtree(work)
-        print(f"  cleanup: removed {n_files} work items ({total_mb:.0f} MB)")
+    if cleanup:
+        import shutil
+        if work.exists():
+            total_mb = sum(
+                f.stat().st_size for f in work.rglob("*") if f.is_file()
+            ) / (1024 * 1024)
+            n_files = sum(1 for f in work.rglob("*") if f.is_file())
+            shutil.rmtree(work)
+            print(f"  cleanup: removed {n_files} work items ({total_mb:.0f} MB)")
+    else:
+        print(f"  intermediate shows retained in {work}/")
 
     print(f"\nOutput: {out}")
     return out
 
 
+# ── One-shot flow (plan + render) ────────────────────────────────────────────
+
+@flow(name="show-reel", log_prints=True,
+      task_runner=ConcurrentTaskRunner(max_workers=4))
+def show_reel(
+    n_shows: int = 20,
+    min_dur: float = 5.0,
+    max_dur: float = 10.0,
+    min_complexity: float = 0.1,
+    max_complexity: float = 0.6,
+    transition_dur: float = 0.5,
+    width: int = 1280,
+    height: int = 720,
+    src: Optional[Path] = None,
+    footage_ratio: float = 0.4,
+    seed: Optional[int] = None,
+    output: Optional[Path] = None,
+    cleanup: bool = True,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Generate a show reel: N short clips at varying complexity,
+    joined with random transitions.
+
+    n_shows:        number of shows (segments)
+    min_dur/max_dur: duration range for each show (seconds)
+    min_complexity:  lowest complexity for a show
+    max_complexity:  highest complexity for a show
+    transition_dur:  transition duration between shows (seconds)
+    src:            optional source footage — when provided, some shows use it
+    footage_ratio:  probability each show uses footage vs generator (0.0–1.0)
+    cleanup:        remove intermediate show clips after joining (default True)
+    """
+    c = cfg or Config()
+    manifest = _plan_shows(
+        n_shows=n_shows, min_dur=min_dur, max_dur=max_dur,
+        min_complexity=min_complexity, max_complexity=max_complexity,
+        transition_dur=transition_dur, width=width, height=height,
+        src=src, footage_ratio=footage_ratio, seed=seed,
+        output=output, cfg=c,
+    )
+    return show_reel_render(manifest, cfg=c, cleanup=cleanup)
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
-def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="Show reel generator")
+def _add_plan_args(parser):
+    """Add the shared show-reel arguments to a parser."""
     parser.add_argument("-n", "--n-shows", type=int, default=20,
                         help="Number of shows")
     parser.add_argument("--min-dur", type=float, default=5.0,
@@ -204,23 +301,90 @@ def main():
                         help="Fraction of shows that use footage (0.0–1.0)")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("-o", "--output", type=str, default=None)
+    parser.add_argument("--no-cleanup", action="store_true",
+                        help="Retain intermediate show clips in work dir")
+
+
+def main():
+    import argparse
+    import sys
+
+    # If the first positional arg isn't a known subcommand, assume "run"
+    _COMMANDS = {"plan", "render", "run"}
+    if len(sys.argv) > 1 and sys.argv[1] not in _COMMANDS:
+        sys.argv.insert(1, "run")
+
+    parser = argparse.ArgumentParser(
+        description="Show reel generator",
+        usage="python -m pipeline.flows.show_reel {plan,render,run} ...",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    # plan — generate recipes, save manifest, no rendering
+    p_plan = sub.add_parser("plan", help="Preview recipes and save a manifest (no rendering)")
+    _add_plan_args(p_plan)
+
+    # render — load manifest and render
+    p_render = sub.add_parser("render", help="Render a show reel from a manifest JSON")
+    p_render.add_argument("manifest", type=str, help="Path to manifest JSON file")
+    p_render.add_argument("-o", "--output", type=str, default=None,
+                          help="Override output path from manifest")
+    p_render.add_argument("--no-cleanup", action="store_true",
+                          help="Retain intermediate show clips in work dir")
+
+    # run — one-shot plan + render (original behaviour)
+    p_run = sub.add_parser("run", help="Plan and render in one shot (default)")
+    _add_plan_args(p_run)
+
     args = parser.parse_args()
 
-    out = Path(args.output) if args.output else None
-    show_reel(
-        n_shows=args.n_shows,
-        min_dur=args.min_dur,
-        max_dur=args.max_dur,
-        min_complexity=args.min_complexity,
-        max_complexity=args.max_complexity,
-        transition_dur=args.transition_dur,
-        width=args.width,
-        height=args.height,
-        src=Path(args.src) if args.src else None,
-        footage_ratio=args.footage_ratio,
-        seed=args.seed,
-        output=out,
-    )
+    if args.command == "plan":
+        cfg = Config()
+        cfg.ensure_dirs()
+        manifest = _plan_shows(
+            n_shows=args.n_shows,
+            min_dur=args.min_dur,
+            max_dur=args.max_dur,
+            min_complexity=args.min_complexity,
+            max_complexity=args.max_complexity,
+            transition_dur=args.transition_dur,
+            width=args.width,
+            height=args.height,
+            src=Path(args.src) if args.src else None,
+            footage_ratio=args.footage_ratio,
+            seed=args.seed,
+            output=Path(args.output) if args.output else None,
+            cfg=cfg,
+        )
+        # Save manifest
+        manifest_path = cfg.work_dir / f"reel_{manifest['seed']}_manifest.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        print(f"\n  manifest saved: {manifest_path}")
+        print(f"  edit it, then: python -m pipeline.flows.show_reel render {manifest_path}")
+
+    elif args.command == "render":
+        manifest = json.loads(Path(args.manifest).read_text())
+        out = Path(args.output) if args.output else None
+        show_reel_render(manifest, output=out, cleanup=not args.no_cleanup)
+
+    elif args.command == "run":
+        out = Path(args.output) if args.output else None
+        show_reel(
+            n_shows=args.n_shows,
+            min_dur=args.min_dur,
+            max_dur=args.max_dur,
+            min_complexity=args.min_complexity,
+            max_complexity=args.max_complexity,
+            transition_dur=args.transition_dur,
+            width=args.width,
+            height=args.height,
+            src=Path(args.src) if args.src else None,
+            footage_ratio=args.footage_ratio,
+            seed=args.seed,
+            output=out,
+            cleanup=not args.no_cleanup,
+        )
 
 
 if __name__ == "__main__":

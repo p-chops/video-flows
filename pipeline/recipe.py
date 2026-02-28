@@ -1377,6 +1377,21 @@ def _random_steps(rng: _random_mod.Random, n_steps: int, complexity: float = 0.5
     return steps
 
 
+def _ensure_motion(rng: _random_mod.Random, steps: list[Step]) -> list[Step]:
+    """If no time effects in steps, insert one before the last step."""
+    if any(isinstance(s, _TIME_STEPS) for s in steps):
+        return steps
+
+    effect = rng.choice([
+        EchoStep(delay=0.0, trail=rng.uniform(0.7, 0.95)),
+        DriftStep(loop_dur=rng.uniform(0.5, 1.5), drift=None),
+        PingPongStep(window=rng.uniform(0.3, 0.8)),
+    ])
+    steps = list(steps)
+    steps.insert(max(0, len(steps) - 1), effect)
+    return steps
+
+
 def _random_source(
     rng: _random_mod.Random,
     src: Optional[Path],
@@ -1449,13 +1464,7 @@ def _random_transition(rng: _random_mod.Random) -> TransitionSpec:
 
 def _random_composite(rng: _random_mod.Random) -> CompositeSpec:
     """Pick a random compositing method for multi-lane recipes."""
-    if rng.random() < 0.5:
-        return BlendComposite(
-            mode=rng.choice(_BLEND_MODES),
-            opacity=rng.uniform(0.3, 0.7),
-        )
-    else:
-        return MaskedComposite(mask_type=rng.choice(_MASK_TYPES))
+    return MaskedComposite(mask_type=rng.choice(_MASK_TYPES))
 
 
 def _random_post(rng: _random_mod.Random) -> list[Step]:
@@ -1641,6 +1650,8 @@ def _build_crush_sandwich(
         steps.append(CrushStep(crush=crush_val, codec=codec, downscale=downscale))
         steps.append(_shader_step(rng, complexity))
 
+    steps = _ensure_motion(rng, steps)
+
     source = _random_source(rng, src, use_generators, complexity)
     lane = _make_lane(rng, source=source, steps=steps, n_segments=actual_segments,
                       wants_transition=wants_transition, seg_target=seg_target)
@@ -1784,6 +1795,8 @@ def _build_escalation(
                 ))
             steps.append(_shader_step(rng, complexity, n=max(1, int(1 + progress * 2))))
 
+        steps = _ensure_motion(rng, steps)
+
         source = _random_source(rng, src, use_generators, complexity)
         lane = _make_lane(rng, source=source, steps=steps, n_segments=actual_segments,
                           wants_transition=wants_transition, seg_target=seg_target)
@@ -1813,6 +1826,8 @@ def _build_escalation(
                     lane_steps.append(CrushStep(crush=rng.uniform(0.9, 1.0),
                                                 codec=rng.choice(_CODECS)))
 
+            lane_steps = _ensure_motion(rng, lane_steps)
+
             source = _random_source(rng, src, use_generators, complexity)
             lane = _make_lane(rng, source=source, steps=lane_steps,
                               n_segments=actual_segments,
@@ -1821,10 +1836,8 @@ def _build_escalation(
 
         recipe = _assemble_recipe(lanes, rng=rng, complexity=complexity, src=src,
                                   seed=seed, wants_post=wants_post)
-        # Override composite to use brightness-neutral overlay
-        recipe.composite = BlendComposite(
-            mode=rng.choice(["overlay", "softlight"]),
-            opacity=rng.uniform(0.3, 0.6),
+        recipe.composite = MaskedComposite(
+            mask_type=rng.choice(_MASK_TYPES),
         )
         return recipe
 
@@ -1872,10 +1885,8 @@ def _build_polyrhythm(
 
     recipe = _assemble_recipe(lanes, rng=rng, complexity=complexity, src=src,
                               seed=seed, wants_post=rng.random() < 0.3)
-    # Brightness-neutral blend
-    recipe.composite = BlendComposite(
-        mode=rng.choice(["overlay", "softlight", "normal"]),
-        opacity=rng.uniform(0.3, 0.6),
+    recipe.composite = MaskedComposite(
+        mask_type=rng.choice(_MASK_TYPES),
     )
     return recipe
 
@@ -1917,6 +1928,8 @@ def _build_palimpsest(
     ]
     if complexity > 0.5:
         b_steps.append(_random_time_step(rng, complexity))
+
+    a_steps = _ensure_motion(rng, a_steps)
 
     # Same source for both lanes
     source = _random_source(rng, src, use_generators, complexity)
@@ -1977,6 +1990,9 @@ def _build_hybrid(
     )
     gen_steps: list[Step] = [_shader_step(rng, complexity, n=1)]
 
+    footage_steps = _ensure_motion(rng, footage_steps)
+    gen_steps = _ensure_motion(rng, gen_steps)
+
     lane_a = _make_lane(rng, source=footage_source, steps=footage_steps,
                         n_segments=actual_segments,
                         wants_transition=wants_transition, seg_target=seg_target)
@@ -2022,7 +2038,7 @@ def _build_grab_bag(
         source = _random_source(rng, src, use_generators, complexity)
         if seg_target is not None:
             source = _override_source_dur(source, seg_target)
-        steps = _random_steps(rng, lane_steps, complexity)
+        steps = _ensure_motion(rng, _random_steps(rng, lane_steps, complexity))
         sequencing = "shuffle" if rng.random() < 0.6 else "concat"
         transition = _random_transition(rng) if wants_transition else None
         lanes.append(Lane(
@@ -2032,6 +2048,142 @@ def _build_grab_bag(
 
     return _assemble_recipe(lanes, rng=rng, complexity=complexity, src=src,
                             seed=seed, wants_post=wants_post)
+
+
+def _build_stutter(
+    rng: _random_mod.Random,
+    complexity: float,
+    src: Optional[Path],
+    *,
+    n_lanes: Optional[int],
+    n_steps: Optional[int],
+    n_segments: Optional[int],
+    use_transitions: Optional[bool],
+    use_generators: Optional[bool],
+    target_dur: Optional[float],
+    seed: Optional[int],
+) -> BrainWipeRecipe:
+    """Rapid-fire short segments with hard cuts. Channel-surfing within a show."""
+    # Many short segments — the structure IS the effect
+    actual_segments = n_segments or max(4, int(4 + complexity * 8))
+
+    # Short per-segment durations (0.5–2s each)
+    seg_dur = rng.uniform(0.5, 1.0 + complexity * 1.0)
+
+    # Light processing per segment — let the cuts do the work
+    n_st = n_steps or max(1, int(1 + complexity * 2))
+    steps = _random_steps(rng, n_st, complexity)
+    steps = _ensure_motion(rng, steps)
+
+    source = _random_source(rng, src, use_generators, complexity)
+    source = _override_source_dur(source, seg_dur)
+
+    # Always shuffle for maximum discontinuity
+    transition = None  # hard cuts — no transitions
+    lane = Lane(
+        source=source,
+        n_segments=actual_segments,
+        recipe=steps,
+        sequencing="shuffle",
+        transition=transition,
+    )
+
+    return _assemble_recipe([lane], rng=rng, complexity=complexity, src=src,
+                            seed=seed, wants_post=rng.random() < 0.2)
+
+
+def _build_echo_chamber(
+    rng: _random_mod.Random,
+    complexity: float,
+    src: Optional[Path],
+    *,
+    n_lanes: Optional[int],
+    n_steps: Optional[int],
+    n_segments: Optional[int],
+    use_transitions: Optional[bool],
+    use_generators: Optional[bool],
+    target_dur: Optional[float],
+    seed: Optional[int],
+) -> BrainWipeRecipe:
+    """Stacked echo passes with increasing delay — temporal feedback ghosts."""
+    actual_segments = _resolve_segments(rng, complexity, n_segments)
+    wants_transition = use_transitions if use_transitions is not None else (
+        rng.random() < 0.2 + 0.6 * complexity
+    )
+    seg_target = _seg_dur_target(target_dur, actual_segments, wants_transition)
+
+    # 3–5 echo passes with increasing delay
+    n_echoes = n_steps or max(3, int(3 + complexity * 2))
+    n_echoes = min(n_echoes, 5)
+
+    steps: list[Step] = []
+    for i in range(n_echoes):
+        progress = i / max(1, n_echoes - 1)  # 0.0 → 1.0
+        # Delay ramps from motion blur (0) to distinct echoes (0.3s)
+        delay = progress * rng.uniform(0.15, 0.35)
+        # Trail stays high — each pass accumulates
+        trail = rng.uniform(0.75, 0.95)
+        steps.append(EchoStep(delay=delay, trail=trail))
+        # Shader between echoes to shift color per ghost layer
+        if i < n_echoes - 1 and rng.random() < 0.5 + complexity * 0.3:
+            steps.append(_shader_step(rng, complexity, n=1))
+
+    # Final shader pass
+    steps.append(_shader_step(rng, complexity))
+
+    source = _random_source(rng, src, use_generators, complexity)
+    lane = _make_lane(rng, source=source, steps=steps, n_segments=actual_segments,
+                      wants_transition=wants_transition, seg_target=seg_target)
+
+    return _assemble_recipe([lane], rng=rng, complexity=complexity, src=src,
+                            seed=seed, wants_post=False)
+
+
+def _build_warp_focus(
+    rng: _random_mod.Random,
+    complexity: float,
+    src: Optional[Path],
+    *,
+    n_lanes: Optional[int],
+    n_steps: Optional[int],
+    n_segments: Optional[int],
+    use_transitions: Optional[bool],
+    use_generators: Optional[bool],
+    target_dur: Optional[float],
+    seed: Optional[int],
+) -> BrainWipeRecipe:
+    """Generator with heavy warp chain, minimal post-processing. Warps are the star."""
+    actual_segments = _resolve_segments(rng, complexity, n_segments)
+    wants_transition = use_transitions if use_transitions is not None else (
+        rng.random() < 0.2 + 0.6 * complexity
+    )
+    seg_target = _seg_dur_target(target_dur, actual_segments, wants_transition)
+
+    # Heavy warps — 3–4 stacked
+    n_warps = max(3, int(3 + complexity))
+
+    source = GeneratorSource(
+        n_warps=n_warps,
+    )
+    if seg_target is not None:
+        source = _override_source_dur(source, seg_target)
+
+    # Minimal steps — one time effect + one shader at most
+    steps: list[Step] = []
+    steps.append(_random_time_step(rng, complexity))
+    if rng.random() < 0.3 + complexity * 0.3:
+        steps.append(_shader_step(rng, complexity, n=1))
+
+    lane = Lane(
+        source=source,
+        n_segments=actual_segments,
+        recipe=steps,
+        sequencing="shuffle" if rng.random() < 0.6 else "concat",
+        transition=_random_transition(rng) if wants_transition else None,
+    )
+
+    return _assemble_recipe([lane], rng=rng, complexity=complexity, src=src,
+                            seed=seed, wants_post=False)
 
 
 # ─── Archetype registry ─────────────────────────────────────────────────────
@@ -2064,6 +2216,16 @@ def _eligible_hybrid(src, n_lanes, use_generators):
 def _eligible_grab_bag(src, n_lanes, use_generators):
     return True
 
+def _eligible_stutter(src, n_lanes, use_generators):
+    return n_lanes is None or n_lanes == 1
+
+def _eligible_echo_chamber(src, n_lanes, use_generators):
+    return n_lanes is None or n_lanes == 1
+
+def _eligible_warp_focus(src, n_lanes, use_generators):
+    # Generator-only — always eligible (ignores src)
+    return n_lanes is None or n_lanes == 1
+
 _ARCHETYPES: dict[str, tuple] = {
     "crush_sandwich":    (_build_crush_sandwich, _eligible_crush_sandwich),
     "deep_time":         (_build_deep_time, _eligible_deep_time),
@@ -2073,6 +2235,9 @@ _ARCHETYPES: dict[str, tuple] = {
     "palimpsest":        (_build_palimpsest, _eligible_palimpsest),
     "hybrid":            (_build_hybrid, _eligible_hybrid),
     "grab_bag":          (_build_grab_bag, _eligible_grab_bag),
+    "stutter":           (_build_stutter, _eligible_stutter),
+    "echo_chamber":      (_build_echo_chamber, _eligible_echo_chamber),
+    "warp_focus":        (_build_warp_focus, _eligible_warp_focus),
 }
 
 
