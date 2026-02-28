@@ -182,11 +182,30 @@ class FlowWarpStep:
     amplify: float = 3.0         # 1.0 = natural, 3.0 = 3x exaggerated
     smooth: int = 15             # flow field smoothing kernel (odd)
 
+@dataclass
+class TemporalSortStep:
+    """Temporal sort — sort pixel values across time, play sorted sequence."""
+    mode: str = "luminance"      # "luminance", "red", "green", "blue"
+    direction: str = "ascending" # "ascending" or "descending"
+
+@dataclass
+class ExtremaHoldStep:
+    """Extrema hold — each pixel accumulates brightest/darkest value over time."""
+    mode: str = "max"            # "max", "min", "both"
+    decay: float = 0.0           # 0 = permanent, 0.01 = slow fade, 0.1 = fast
+
+@dataclass
+class FeedbackTransformStep:
+    """Feedback with spatial transform — infinite regression trails."""
+    transform: str = "zoom"      # "zoom", "rotate", "spiral", "shift"
+    amount: float = 0.02         # transform magnitude per frame
+    mix: float = 0.7             # feedback strength 0-1
+
 Step = (CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep
         | PingPongStep | EchoStep | PatchStep | SlitScanStep | TemporalTileStep
         | SmearStep | BloomStep | StackStep | SlipStep
         | MirrorStep | ZoomStep | InvertStep | HueShiftStep | SaturateStep
-        | FlowWarpStep)
+        | FlowWarpStep | TemporalSortStep | ExtremaHoldStep | FeedbackTransformStep)
 
 
 # ─── Transitions ──────────────────────────────────────────────────────────────
@@ -1440,6 +1459,9 @@ _STEP_POOL: list[tuple[type, int]] = [
     (PatchStep, 1),       # random temporal patches
     (ScrubStep, 1),       # reduced — causes "stuttering"
     (PingPongStep, 1),    # reduced — causes "breathing"
+    (TemporalSortStep, 2),  # per-pixel temporal reordering — alien dissolves
+    (ExtremaHoldStep, 2),   # accumulation trails — long exposure for video
+    (FeedbackTransformStep, 2),  # infinite regression / fractal echo
     # Spatial / color transforms
     (MirrorStep, 2),
     (ZoomStep, 2),
@@ -1450,7 +1472,7 @@ _STEP_POOL: list[tuple[type, int]] = [
 
 _TIME_STEPS = (ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
                SlitScanStep, TemporalTileStep, SmearStep, BloomStep, StackStep, SlipStep,
-               FlowWarpStep)
+               FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep)
 
 _TRANSITION_POOL: list[tuple[str, int]] = [
     ("crossfade", 4),
@@ -1831,7 +1853,7 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
     cls = rng.choice([
         ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
         SlitScanStep, TemporalTileStep, SmearStep, BloomStep, StackStep, SlipStep,
-        FlowWarpStep,
+        FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
     ])
     if cls is ScrubStep:
         return ScrubStep(
@@ -1872,6 +1894,31 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
             n_bands=rng.choice([4, 6, 8, 12]),
             max_slip=rng.uniform(0.2, 0.5 + complexity * 0.3),
             axis=rng.choice(["horizontal", "vertical"]),
+        )
+    elif cls is TemporalSortStep:
+        return TemporalSortStep(
+            mode=rng.choice(["luminance", "luminance", "red", "green", "blue"]),
+            direction=rng.choice(["ascending", "descending"]),
+        )
+    elif cls is ExtremaHoldStep:
+        return ExtremaHoldStep(
+            mode=rng.choice(["max", "max", "min", "both"]),
+            decay=rng.choice([0.0, 0.0, 0.005, 0.01, 0.02, 0.05]),
+        )
+    elif cls is FeedbackTransformStep:
+        xform = rng.choice(["zoom", "rotate", "spiral", "shift"])
+        if xform == "zoom":
+            amt = rng.uniform(0.005, 0.03)
+        elif xform == "rotate":
+            amt = rng.uniform(0.01, 0.05)
+        elif xform == "spiral":
+            amt = rng.uniform(0.005, 0.02)
+        else:  # shift
+            amt = rng.uniform(0.005, 0.02)
+        return FeedbackTransformStep(
+            transform=xform,
+            amount=amt,
+            mix=rng.uniform(0.5, 0.85),
         )
     else:  # FlowWarpStep
         return FlowWarpStep(

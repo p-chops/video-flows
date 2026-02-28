@@ -88,6 +88,9 @@ from ..recipe import (
     HueShiftStep,
     SaturateStep,
     FlowWarpStep,
+    TemporalSortStep,
+    ExtremaHoldStep,
+    FeedbackTransformStep,
     BlendComposite,
     MaskedComposite,
     RandomComposite,
@@ -129,6 +132,9 @@ from ..tasks import (
     hue_shift,
     saturate,
     flow_warp,
+    temporal_sort,
+    extrema_hold,
+    feedback_transform,
 )
 
 
@@ -668,6 +674,21 @@ def _submit_step(
         case FlowWarpStep(amplify=amplify, smooth=smooth):
             return flow_warp.submit(
                 src, dst, amplify=amplify, smooth=smooth,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case TemporalSortStep(mode=mode, direction=direction):
+            return temporal_sort.submit(
+                src, dst, mode=mode, direction=direction,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case ExtremaHoldStep(mode=mode, decay=decay):
+            return extrema_hold.submit(
+                src, dst, mode=mode, decay=decay,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case FeedbackTransformStep(transform=xform, amount=amount, mix=mix_val):
+            return feedback_transform.submit(
+                src, dst, transform=xform, amount=amount, mix=mix_val,
                 seed=rng.randint(0, 2 ** 31), cfg=cfg,
             )
         case _:

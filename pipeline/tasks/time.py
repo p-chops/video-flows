@@ -1,7 +1,7 @@
 """
 Temporal manipulation tasks — time scrubbing, drift looping, ping-pong,
 echo trails, temporal patchwork, slit-scan, temporal tile, smear, bloom,
-stack, slip.
+stack, slip, temporal sort, extrema hold, feedback transform.
 """
 
 from __future__ import annotations
@@ -1025,5 +1025,302 @@ def flow_warp(
 
     elapsed = _time.monotonic() - t0
     print(f"  wrote {frame_count} frames in {elapsed:.1f}s → {dst.name}")
+
+    return dst
+
+
+@task(name="temporal-sort")
+def temporal_sort(
+    src: Path,
+    dst: Path,
+    *,
+    mode: str = "luminance",
+    direction: str = "ascending",
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Temporal sort — for each pixel position, sort all values across time
+    by luminance (or by channel), then play the sorted sequence back.
+
+    Every pixel independently transitions from its darkest to brightest
+    moment (ascending) or vice versa (descending). Static parts stay
+    constant; moving parts create a strange chromatic dissolve that has
+    no relationship to the original timeline.
+
+    Output is the same duration as input.
+
+    mode:      "luminance" (sort by Y), "red", "green", "blue"
+               (sort by that channel). Default "luminance".
+    direction: "ascending" (dark→bright) or "descending" (bright→dark).
+               Default "ascending".
+    seed:      unused, kept for interface consistency.
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+
+    frames: list[np.ndarray] = []
+    for frame in read_frames(src, c):
+        frames.append(frame)
+    n = len(frames)
+
+    if n == 0:
+        raise ValueError(f"No frames read from {src}")
+
+    h, w = info.height, info.width
+    mem_mb = n * w * h * 3 / 1e6
+    print(f"temporal_sort: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+    print(f"  mode={mode}, direction={direction}")
+    print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
+
+    # Stack into (T, H, W, 3) volume
+    vol = np.stack(frames, axis=0)  # (T, H, W, 3)
+
+    # Compute sort key per pixel per frame
+    if mode == "luminance":
+        # BT.601 luminance
+        key = (0.299 * vol[:, :, :, 0].astype(np.float32)
+               + 0.587 * vol[:, :, :, 1].astype(np.float32)
+               + 0.114 * vol[:, :, :, 2].astype(np.float32))
+    elif mode in ("red", "green", "blue"):
+        ch = {"red": 0, "green": 1, "blue": 2}[mode]
+        key = vol[:, :, :, ch].astype(np.float32)
+    else:
+        key = vol[:, :, :, 0].astype(np.float32)
+
+    # key shape: (T, H, W)
+    print(f"  sorting {n}x{h}x{w} pixels along time axis...")
+    t0 = _time.monotonic()
+
+    # argsort along time axis (axis=0)
+    order = np.argsort(key, axis=0)  # (T, H, W) — indices into time axis
+    if direction == "descending":
+        order = order[::-1]
+
+    # Reorder each channel using the sort indices
+    sorted_vol = np.empty_like(vol)
+    for ch in range(3):
+        channel = vol[:, :, :, ch]  # (T, H, W)
+        sorted_vol[:, :, :, ch] = np.take_along_axis(channel, order, axis=0)
+
+    sort_elapsed = _time.monotonic() - t0
+    print(f"  sorted in {sort_elapsed:.1f}s")
+
+    # Write sorted frames
+    with FrameWriter(dst, info, cfg=c) as writer:
+        t0 = _time.monotonic()
+        last_log = t0
+        for i in range(n):
+            writer.write(sorted_vol[i])
+
+            now = _time.monotonic()
+            if now - last_log >= 5.0:
+                pct = (i + 1) / n * 100
+                elapsed = now - t0
+                logger.info("temporal_sort: %.0f%% (%d/%d) elapsed=%.1fs",
+                            pct, i + 1, n, elapsed)
+                last_log = now
+
+    elapsed = _time.monotonic() - t0
+    print(f"  wrote {n} frames in {elapsed:.1f}s -> {dst.name}")
+
+    return dst
+
+
+@task(name="extrema-hold")
+def extrema_hold(
+    src: Path,
+    dst: Path,
+    *,
+    mode: str = "max",
+    decay: float = 0.0,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Extrema hold — each pixel accumulates the brightest (or darkest)
+    value it has reached so far. Motion leaves permanent trails;
+    static areas stay put. Like long-exposure photography for video.
+
+    With decay > 0, the held extrema slowly relax back toward the
+    current frame, so trails fade over time rather than being permanent.
+
+    Single-pass streaming. One canvas buffer.
+
+    Output is the same duration as input.
+
+    mode:  "max" (brightest survives — bright trails on dark background),
+           "min" (darkest survives — dark trails on bright background),
+           "both" (R=max hold, G=current, B=min hold — split channels).
+           Default "max".
+    decay: how fast extrema relax back toward current frame, 0–1.
+           0 = permanent hold (pure accumulation).
+           0.01 = very slow fade (trails last many seconds).
+           0.1 = moderate fade.
+           Default 0.0.
+    seed:  unused, kept for interface consistency.
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+
+    print(f"extrema_hold: {info.duration:.1f}s @ {info.fps}fps, "
+          f"{info.width}x{info.height}")
+    print(f"  mode={mode}, decay={decay}")
+
+    canvas_max: Optional[np.ndarray] = None
+    canvas_min: Optional[np.ndarray] = None
+    frame_count = 0
+
+    with FrameWriter(dst, info, cfg=c) as writer:
+        t0 = _time.monotonic()
+        last_log = t0
+        for frame in read_frames(src, c):
+            f = frame.astype(np.float32)
+
+            if canvas_max is None:
+                canvas_max = f.copy()
+                canvas_min = f.copy()
+            else:
+                # Decay: relax held values toward current frame
+                if decay > 0:
+                    canvas_max += (f - canvas_max) * decay
+                    canvas_min += (f - canvas_min) * decay
+
+                # Update extrema
+                np.maximum(canvas_max, f, out=canvas_max)
+                np.minimum(canvas_min, f, out=canvas_min)
+
+            if mode == "max":
+                out = canvas_max
+            elif mode == "min":
+                out = canvas_min
+            else:  # "both" — split channels
+                out = np.stack([
+                    canvas_max[:, :, 0],  # R = max hold (red trails)
+                    f[:, :, 1],           # G = current (live green)
+                    canvas_min[:, :, 2],  # B = min hold (blue shadows)
+                ], axis=2)
+
+            writer.write(np.clip(out, 0, 255).astype(np.uint8))
+            frame_count += 1
+
+            now = _time.monotonic()
+            if now - last_log >= 5.0:
+                elapsed = now - t0
+                logger.info("extrema_hold: %d frames, elapsed=%.1fs",
+                            frame_count, elapsed)
+                last_log = now
+
+    elapsed = _time.monotonic() - t0
+    print(f"  wrote {frame_count} frames in {elapsed:.1f}s -> {dst.name}")
+
+    return dst
+
+
+@task(name="feedback-transform")
+def feedback_transform(
+    src: Path,
+    dst: Path,
+    *,
+    transform: str = "zoom",
+    amount: float = 0.02,
+    mix: float = 0.7,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Feedback with spatial transform — each output frame blends the
+    current input with a spatially-transformed version of the previous
+    output. Creates infinite regression trails, spiral echoes, fractal
+    temporal stacking.
+
+    Different from echo because feedback compounds geometrically —
+    each frame contains ghosts of ALL previous frames, not just a
+    windowed average.
+
+    Single-pass streaming. One previous-output buffer.
+
+    Output is the same duration as input.
+
+    transform: spatial transform applied to the feedback buffer.
+               "zoom" = slow zoom in/out (default).
+               "rotate" = slow rotation.
+               "spiral" = zoom + rotation combined.
+               "shift" = horizontal drift.
+    amount:    magnitude of the spatial transform per frame.
+               For zoom: fraction of zoom per frame (0.02 = 2% zoom/frame).
+               For rotate: radians per frame (0.02 ~ 1.1 deg/frame).
+               For shift: fraction of width per frame.
+               Default 0.02.
+    mix:       blend ratio of feedback vs current frame, 0-1.
+               0 = no feedback (passthrough).
+               0.5 = equal blend.
+               0.7 = strong feedback, faint new content.
+               0.9 = extreme — trails dominate.
+               Default 0.7.
+    seed:      unused, kept for interface consistency.
+    """
+    import cv2
+
+    c = cfg or Config()
+    info = probe(src, c)
+
+    print(f"feedback_transform: {info.duration:.1f}s @ {info.fps}fps, "
+          f"{info.width}x{info.height}")
+    print(f"  transform={transform}, amount={amount}, mix={mix}")
+
+    h, w = info.height, info.width
+    cx, cy = w / 2.0, h / 2.0
+
+    prev_out: Optional[np.ndarray] = None
+    frame_count = 0
+
+    with FrameWriter(dst, info, cfg=c) as writer:
+        t0 = _time.monotonic()
+        last_log = t0
+        for frame in read_frames(src, c):
+            f = frame.astype(np.float32)
+
+            if prev_out is None:
+                out = f
+            else:
+                # Build affine transform matrix for the feedback
+                if transform == "zoom":
+                    s = 1.0 + amount
+                    M = cv2.getRotationMatrix2D((cx, cy), 0, s)
+                elif transform == "rotate":
+                    deg = amount * (180.0 / 3.14159265)
+                    M = cv2.getRotationMatrix2D((cx, cy), deg, 1.0)
+                elif transform == "spiral":
+                    s = 1.0 + amount
+                    deg = amount * 0.5 * (180.0 / 3.14159265)
+                    M = cv2.getRotationMatrix2D((cx, cy), deg, s)
+                else:  # "shift"
+                    M = np.float64([[1, 0, amount * w],
+                                    [0, 1, 0]])
+
+                # Apply spatial transform to previous output
+                warped = cv2.warpAffine(
+                    prev_out, M, (w, h),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_REFLECT,
+                )
+
+                # Blend: current frame + transformed feedback
+                out = (1.0 - mix) * f + mix * warped
+
+            prev_out = out.copy()
+            writer.write(np.clip(out, 0, 255).astype(np.uint8))
+            frame_count += 1
+
+            now = _time.monotonic()
+            if now - last_log >= 5.0:
+                elapsed = now - t0
+                logger.info("feedback_transform: %d frames, elapsed=%.1fs",
+                            frame_count, elapsed)
+                last_log = now
+
+    elapsed = _time.monotonic() - t0
+    print(f"  wrote {frame_count} frames in {elapsed:.1f}s -> {dst.name}")
 
     return dst
