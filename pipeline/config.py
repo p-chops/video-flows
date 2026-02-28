@@ -36,6 +36,14 @@ class Config:
     # None = unconstrained (pure CRF).
     default_video_bitrate: Optional[int] = None
 
+    # ── GPU encoding (VideoToolbox) ───────────────────────────────────
+    # When True, clean encodes use h264_videotoolbox instead of libx264.
+    # Does NOT affect bitrate_crush dirty passes (they need libx264/mpeg2/mpeg4).
+    gpu_encode: bool = True
+    # VideoToolbox quality scale: 1–100, higher = better quality / larger files.
+    # ~60 ≈ CRF 18, ~35 ≈ CRF ~24 (visually acceptable for intermediates).
+    vt_quality: int = 60
+
     # ── FFmpeg ───────────────────────────────────────────────────────────
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
@@ -50,6 +58,23 @@ class Config:
             self.work_dir = self.project_root / "work"
         if self.output_dir is None:
             self.output_dir = self.project_root / "output"
+
+    def encode_args(self) -> list[str]:
+        """Return codec + quality ffmpeg args for clean encodes.
+
+        When gpu_encode is True, uses h264_videotoolbox with -q:v quality.
+        Otherwise uses libx264 with -crf quality.
+        Appends -pix_fmt and optional bitrate constraints.
+        """
+        if self.gpu_encode:
+            args = ["-c:v", "h264_videotoolbox", "-q:v", str(self.vt_quality)]
+        else:
+            args = ["-c:v", self.default_codec, "-crf", str(self.default_crf)]
+        args += ["-pix_fmt", self.default_pix_fmt]
+        if not self.gpu_encode and self.default_video_bitrate is not None:
+            br = self.default_video_bitrate
+            args += ["-maxrate", f"{br}k", "-bufsize", f"{br * 2}k"]
+        return args
 
     def ensure_dirs(self):
         """Create all directories if they don't exist."""

@@ -69,8 +69,7 @@ def blend_layers(base: Path, overlay: Path, dst: Path,
         "-filter_complex",
         f"[0:v][1:v]blend=all_mode={ff_mode}:all_opacity={opacity}:shortest=1",
         "-an",
-        "-c:v", c.default_codec, "-crf", str(c.default_crf),
-        "-pix_fmt", c.default_pix_fmt,
+        *c.encode_args(),
         str(dst),
     ], duration=info.duration, logger=log, label="blend-layers")
 
@@ -112,8 +111,7 @@ def masked_composite(base: Path, overlay: Path,
         "-i", str(base), "-i", str(overlay), "-i", str(mask),
         "-filter_complex", filter_graph,
         "-an", "-shortest",
-        "-c:v", c.default_codec, "-crf", str(c.default_crf),
-        "-pix_fmt", c.default_pix_fmt,
+        *c.encode_args(),
         str(dst),
     ], duration=info.duration, logger=log, label="masked-composite")
 
@@ -181,8 +179,7 @@ def multi_layer_composite(
         *inputs,
         "-filter_complex", filter_graph,
         "-an",
-        "-c:v", c.default_codec, "-crf", str(c.default_crf),
-        "-pix_fmt", c.default_pix_fmt,
+        *c.encode_args(),
         str(dst),
     ], duration=info.duration, logger=log, label="multi-layer-composite")
 
@@ -224,8 +221,7 @@ def picture_in_picture(base: Path, overlay: Path, dst: Path,
         "-i", str(base), "-i", str(overlay),
         "-filter_complex", filter_graph,
         "-an",
-        "-c:v", c.default_codec, "-crf", str(c.default_crf),
-        "-pix_fmt", c.default_pix_fmt,
+        *c.encode_args(),
         str(dst),
     ], duration=info.duration, logger=log, label="picture-in-picture")
 

@@ -134,13 +134,8 @@ class FrameWriter:
             "-s", f"{self.info.width}x{self.info.height}",
             "-r", str(self.info.fps),
             "-i", "-",
-            "-c:v", self.cfg.default_codec,
-            "-pix_fmt", self.cfg.default_pix_fmt,
-            "-crf", str(self.cfg.default_crf),
+            *self.cfg.encode_args(),
         ]
-        if self.cfg.default_video_bitrate is not None:
-            br = self.cfg.default_video_bitrate
-            cmd += ["-maxrate", f"{br}k", "-bufsize", f"{br * 2}k"]
         cmd.append(str(self.path))
         self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
         return self
@@ -256,12 +251,8 @@ def extract_segment(src: Path, dst: Path,
         "-ss", f"{start:.3f}", "-i", str(src),
         "-t", f"{duration:.3f}",
         "-an",
-        "-c:v", c.default_codec, "-crf", str(c.default_crf),
-        "-pix_fmt", c.default_pix_fmt,
+        *c.encode_args(),
     ]
-    if c.default_video_bitrate is not None:
-        br = c.default_video_bitrate
-        cmd += ["-maxrate", f"{br}k", "-bufsize", f"{br * 2}k"]
     if fps:
         cmd += ["-r", str(fps)]
     cmd.append(str(dst))

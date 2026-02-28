@@ -26,7 +26,7 @@ pipeline/
 │   ├── mask.py            # Luma, edge (Canny), motion, chroma, gradient masks
 │   ├── color.py           # normalize_levels, auto_levels — level stretch + gamma correction
 │   ├── glitch.py          # bitrate_crush — codec-based compression artifacts
-│   ├── time.py            # Temporal effects: scrub, drift, ping-pong, echo, patch, slit_scan, temporal_tile, smear, bloom, frame_stack, slip, flow_warp
+│   ├── time.py            # Temporal effects: scrub, drift, ping-pong, echo, patch, slit_scan, temporal_tile, smear, bloom, frame_stack, slip, flow_warp, temporal_sort, extrema_hold, feedback_transform
 │   ├── transform.py       # Spatial/color transforms: mirror, zoom, invert, hue_shift, saturate
 │   └── transition.py      # Transitions: crossfade, luma_wipe, whip_pan, static_burst, flash
 └── flows/                 # Prefect @flow compositions (example pipelines)
@@ -157,6 +157,9 @@ Blend modes use ffmpeg filter names mapped via `FFMPEG_BLEND_MODES` dict. Adding
 | frame_stack | `frame_stack` | `window`, `mode` | Ring buffer |
 | slip | `slip` | `n_bands`, `max_slip`, `axis`, `seed` | All frames in RAM |
 | flow_warp | `flow_warp` | `amplify`, `smooth`, `seed` | Streaming (prev frame) |
+| temporal_sort | `temporal_sort` | `mode`, `direction`, `seed` | All frames in RAM (3D volume) |
+| extrema_hold | `extrema_hold` | `mode`, `decay`, `seed` | Streaming (float32 canvas) |
+| feedback_transform | `feedback_transform` | `transform`, `amount`, `mix`, `seed` | Streaming (prev output) |
 
 ### Transform Tasks
 
@@ -176,7 +179,7 @@ Tasks in `pipeline/tasks/transform.py`. Pure ffmpeg filter-graph operations.
 
 A `BrainWipeRecipe` describes: **lanes** (parallel processing streams), **compositing** (how lanes combine), and **post-processing** (final steps). Each lane has a **source** (footage, generator, static, solid), a **recipe** (ordered list of processing steps), and **sequencing** (shuffle, concat, optional static interleaving).
 
-**Step types**: `CrushStep`, `ShaderStep`, `NormalizeStep`, `ScrubStep`, `DriftStep`, `PingPongStep`, `EchoStep`, `PatchStep`, `SlitScanStep`, `TemporalTileStep`, `SmearStep`, `BloomStep`, `StackStep`, `SlipStep`, `FlowWarpStep`, `MirrorStep`, `ZoomStep`, `InvertStep`, `HueShiftStep`, `SaturateStep`. Adding new step types from labs: add a dataclass to `recipe.py`, add to the `Step` union, add a `case` branch in `_submit_step()` in `brain_wipe.py`.
+**Step types**: `CrushStep`, `ShaderStep`, `NormalizeStep`, `ScrubStep`, `DriftStep`, `PingPongStep`, `EchoStep`, `PatchStep`, `SlitScanStep`, `TemporalTileStep`, `SmearStep`, `BloomStep`, `StackStep`, `SlipStep`, `FlowWarpStep`, `TemporalSortStep`, `ExtremaHoldStep`, `FeedbackTransformStep`, `MirrorStep`, `ZoomStep`, `InvertStep`, `HueShiftStep`, `SaturateStep`. Adding new step types from labs: add a dataclass to `recipe.py`, add to the `Step` union, add a `case` branch in `_submit_step()` in `brain_wipe.py`. All step types must also have `_step_to_dict`/`_step_from_dict` serialization for show reel manifest roundtripping.
 
 **Source types**: `FootageSource` (random or scene-based segmentation), `GeneratorSource` (generator shaders + optional warps), `StaticSource`, `SolidSource`.
 
@@ -280,23 +283,28 @@ python -m pipeline.flows.stooges input/footage.mp4 \
     --n-channels 5 --segment-counts 8,10,12,14,16 --seed 42
 ```
 
-## Show Reel Flow
+## Show Reel Flow (Production Ready)
 
-`pipeline/flows/show_reel.py` — channel-surfing through heterogeneous "shows". Each show is a short (5–15s) clip rendered at a random complexity level via `random_recipe` + `brain_wipe` subflow, so some are raw warped generators and others have crush, shaders, time effects, etc. Shows are joined with random per-pair transitions.
+`pipeline/flows/show_reel.py` — channel-surfing through heterogeneous "shows". Each show is a short (5–18s) clip rendered at a random complexity level via `random_recipe` + `brain_wipe` subflow, so some are raw warped generators and others have crush, shaders, time effects, etc. Shows are joined with random per-pair transitions. **Output is consistently usable for stream content as of 2026-02-28.**
 
-Supports optional source footage — when `--src` is provided, each show independently flips a coin at `--footage-ratio` probability to decide whether it uses footage or a generator.
+Supports optional source footage — when `--src` is provided, each show independently flips a coin at `--footage-ratio` probability to decide whether it uses footage or a generator. `--src input/` (directory) picks random .mp4 files per show.
 
 ```
 # Generator-only reel
-PREFECT_API_URL=http://127.0.0.1:4200/api \
-python -m pipeline.flows.show_reel -n 15 --min-dur 10 --max-dur 15 --seed 777
+python -m pipeline.flows.show_reel run -n 15 --min-dur 10 --max-dur 15 --seed 777
 
-# Mixed footage + generator reel (50% footage)
-PREFECT_API_URL=http://127.0.0.1:4200/api \
-python -m pipeline.flows.show_reel -n 10 --src input/footage.mp4 --footage-ratio 0.5 --seed 42
+# Mixed footage + generator reel (70% footage, random files from directory)
+python -m pipeline.flows.show_reel run -n 9 --src input/ --footage-ratio 0.7 --seed 42
+
+# Batch: 9 reels at once
+python -m pipeline.flows.show_reel batch 9 -n 9 --seed 8400 --src input/ --footage-ratio 0.7 --min-complexity 0.3 --max-complexity 0.9 --min-dur 10 --max-dur 18
+
+# Human-in-the-loop: plan → edit manifest → render
+python -m pipeline.flows.show_reel plan -n 8 --seed 777 --src input/footage.mp4
+python -m pipeline.flows.show_reel render output/show_reel_777_manifest.json
 ```
 
-Key parameters: `n_shows` (number of segments), `min_dur`/`max_dur` (duration range), `min_complexity`/`max_complexity` (complexity range per show), `transition_dur`, `width`/`height`, `src` (optional source footage), `footage_ratio` (0.0–1.0, default 0.4), `seed`.
+Key parameters: `n_shows` (number of segments), `min_dur`/`max_dur` (duration range), `min_complexity`/`max_complexity` (complexity range per show), `transition_dur`, `width`/`height`, `src` (optional source footage or directory), `footage_ratio` (0.0–1.0, default 0.4), `seed`.
 
 Note: connect to persistent Prefect server via `PREFECT_API_URL=http://127.0.0.1:4200/api` for UI visibility. Without it, flows start ephemeral servers.
 

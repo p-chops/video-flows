@@ -793,8 +793,7 @@ def _scale_segments_to_recipe(
             "-vf", f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
                    f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2",
             "-an",
-            "-c:v", cfg.default_codec, "-crf", str(cfg.default_crf),
-            "-pix_fmt", cfg.default_pix_fmt,
+            *cfg.encode_args(),
             str(scaled),
         ], check=True)
         result.append(scaled)

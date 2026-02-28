@@ -240,8 +240,7 @@ def show_reel_render(
                 "-i", str(result),
                 "-vf", "normalize=independence=0:smoothing=10:strength=0.8",
                 "-an",
-                "-c:v", c.default_codec, "-crf", str(c.default_crf),
-                "-pix_fmt", c.default_pix_fmt,
+                *c.encode_args(),
                 str(lifted),
             ], check=True)
             result.unlink()

@@ -82,8 +82,9 @@ def _generate_playhead_curve(
     # Shift so position[0] = 0
     position -= position[0]
 
-    # Clamp to valid frame range
-    np.clip(position, 0, n_frames - 1, out=position)
+    # Wrap to valid frame range (mod n) so the playhead loops
+    # instead of freezing on the last frame when it runs ahead.
+    position = position % n_frames
 
     return position
 
@@ -147,8 +148,7 @@ def time_scrub(
         t0 = _time.monotonic()
         last_log = t0
         for i in range(n_loaded):
-            src_idx = int(round(position[i]))
-            src_idx = max(0, min(src_idx, n_loaded - 1))
+            src_idx = int(round(position[i])) % n_loaded
             writer.write(frames[src_idx])
 
             now = _time.monotonic()
@@ -247,7 +247,7 @@ def drift_loop(
             pos_in_loop = out_idx % loop_frames
 
             window_start = start_frame + cycle * drift_frames
-            src_idx = max(0, min(window_start + pos_in_loop, n - 1))
+            src_idx = (window_start + pos_in_loop) % n
             writer.write(frames[src_idx])
 
             now = _time.monotonic()

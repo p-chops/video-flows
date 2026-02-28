@@ -56,8 +56,7 @@ def normalize_levels(
         "-i", str(src),
         "-vf", vf,
         "-an",
-        "-c:v", c.default_codec, "-crf", str(c.default_crf),
-        "-pix_fmt", c.default_pix_fmt,
+        *c.encode_args(),
         str(dst),
     ], check=True)
 
@@ -123,8 +122,7 @@ def auto_levels(
         "-i", str(src),
         "-vf", f"eq=gamma={gamma:.3f}",
         "-an",
-        "-c:v", c.default_codec, "-crf", str(c.default_crf),
-        "-pix_fmt", c.default_pix_fmt,
+        *c.encode_args(),
         str(dst),
     ], check=True)
 
