@@ -55,7 +55,7 @@
         {
             "NAME": "brightness",
             "TYPE": "float",
-            "DEFAULT": 1.0,
+            "DEFAULT": 0.75,
             "MIN": 0.1,
             "MAX": 2.0,
             "LABEL": "Brightness"
@@ -63,7 +63,7 @@
         {
             "NAME": "contrast",
             "TYPE": "float",
-            "DEFAULT": 1.2,
+            "DEFAULT": 0.85,
             "MIN": 0.5,
             "MAX": 4.0,
             "LABEL": "Contrast"

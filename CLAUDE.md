@@ -236,14 +236,21 @@ python -m pipeline.flows.stooges input/footage.mp4 \
 
 ## Show Reel Flow
 
-`pipeline/flows/show_reel.py` — channel-surfing through heterogeneous generator "shows". Each show is a short (5–15s) generator clip rendered at a random complexity level via `random_recipe` + `brain_wipe` subflow, so some are raw warped generators and others have crush, shaders, time effects, etc. Shows are joined with random per-pair transitions.
+`pipeline/flows/show_reel.py` — channel-surfing through heterogeneous "shows". Each show is a short (5–15s) clip rendered at a random complexity level via `random_recipe` + `brain_wipe` subflow, so some are raw warped generators and others have crush, shaders, time effects, etc. Shows are joined with random per-pair transitions.
+
+Supports optional source footage — when `--src` is provided, each show independently flips a coin at `--footage-ratio` probability to decide whether it uses footage or a generator.
 
 ```
+# Generator-only reel
 PREFECT_API_URL=http://127.0.0.1:4200/api \
 python -m pipeline.flows.show_reel -n 15 --min-dur 10 --max-dur 15 --seed 777
+
+# Mixed footage + generator reel (50% footage)
+PREFECT_API_URL=http://127.0.0.1:4200/api \
+python -m pipeline.flows.show_reel -n 10 --src input/footage.mp4 --footage-ratio 0.5 --seed 42
 ```
 
-Key parameters: `n_shows` (number of segments), `min_dur`/`max_dur` (duration range), `min_complexity`/`max_complexity` (complexity range per show), `transition_dur`, `width`/`height`, `seed`.
+Key parameters: `n_shows` (number of segments), `min_dur`/`max_dur` (duration range), `min_complexity`/`max_complexity` (complexity range per show), `transition_dur`, `width`/`height`, `src` (optional source footage), `footage_ratio` (0.0–1.0, default 0.4), `seed`.
 
 Note: connect to persistent Prefect server via `PREFECT_API_URL=http://127.0.0.1:4200/api` for UI visibility. Without it, flows start ephemeral servers.
 
@@ -268,13 +275,13 @@ Separate shader directory from the glitch/color library. Use `--shader-dir brain
 - `ulp-warp-gravitational` — multi-point gravitational lensing (up to 5 orbiting masses)
 - `ulp-warp-voronoi` — Voronoi cell refraction (convex/concave/edge-push modes)
 
-**7 generators (no `inputImage`):**
+**7 generators (no `inputImage`):** All tuned for dynamic range (mean 60–140, p5–p95 range >80).
 - `ulp-brain-wipe-plasma` — sinusoidal plasma field
-- `ulp-brain-wipe-tunnel` — infinite geometric tunnel
-- `ulp-brain-wipe-chladni` — vibrating plate resonance figures
-- `ulp-brain-wipe-rd` — reaction-diffusion simulator (brightest generator)
-- `ulp-abyssal-jellies-v4` — bioluminescent jellyfish swarm
-- `ulp-bioluminescent-field` — deep-sea bioluminescence
+- `ulp-brain-wipe-tunnel` — infinite geometric tunnel (smoothstep soft edges)
+- `ulp-brain-wipe-chladni` — vibrating plate resonance figures (exponential glow halo)
+- `ulp-brain-wipe-rd` — reaction-diffusion simulator (smoothstep contrast expansion)
+- `ulp-infernal-drift` — domain-warped FBM fire (counterpart to abyssal_drift)
+- `ulp-bioluminescent-field` — deep-sea bioluminescence (ambient scatter + wide glow)
 - `abyssal_drift` — deep-sea ambient drift
 
 **Planned but not yet written:**
@@ -289,7 +296,6 @@ Shaders declare categories in their ISF `CATEGORIES` header array. The `filter_s
 
 ## Known Issues / TODO
 
-- **Generator dynamic range** — dark generators (jellies, bioluminescent-field, abyssal_drift: avg Y 17–38) and bright generators (RD: avg Y 193–232) both produce flat output with poor dynamic range. Post-processing (normalize, auto_levels) doesn't work well — it flattens character. Needs shader-level fixes: lift dark floors, clamp bright peaks, reduce solid white blocks.
 - No audio passthrough — all tasks strip audio (`-an`). This is intentional for now (visual processing only) but could be added via ffmpeg's `-c:a copy` flag.
 - Work directory cleanup is not automatic. Intermediate files accumulate in `work/`.
 

@@ -79,7 +79,7 @@
         {
             "NAME": "bg_brightness",
             "TYPE": "float",
-            "DEFAULT": 0.0,
+            "DEFAULT": 0.12,
             "MIN": 0.0,
             "MAX": 1.0,
             "LABEL": "BG Brightness"
@@ -130,6 +130,10 @@ void main() {
 
     // Draw as glowing nodal lines (where f ≈ 0)
     float edge = 1.0 - smoothstep(line_width * line_softness, line_width, abs(f));
+
+    // Soft glow/bloom around lines — exponential falloff for gradient transitions
+    float glow = exp(-abs(f) * abs(f) / (line_width * line_width * 16.0)) * 0.45;
+    edge = max(edge, glow);
 
     if (invert > 0.5) edge = 1.0 - edge;
 

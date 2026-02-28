@@ -32,12 +32,14 @@ def show_reel(
     transition_dur: float = 0.5,
     width: int = 1280,
     height: int = 720,
+    src: Optional[Path] = None,
+    footage_ratio: float = 0.4,
     seed: Optional[int] = None,
     output: Optional[Path] = None,
     cfg: Optional[Config] = None,
 ) -> Path:
     """
-    Generate a show reel: N short generator clips at varying complexity,
+    Generate a show reel: N short clips at varying complexity,
     joined with random transitions.
 
     n_shows:        number of shows (segments)
@@ -45,6 +47,8 @@ def show_reel(
     min_complexity:  lowest complexity for a show
     max_complexity:  highest complexity for a show
     transition_dur:  transition duration between shows (seconds)
+    src:            optional source footage — when provided, some shows use it
+    footage_ratio:  probability each show uses footage vs generator (0.0–1.0)
     """
     c = cfg or Config()
     c.ensure_dirs()
@@ -58,6 +62,10 @@ def show_reel(
     print(f"═══ Show Reel (seed={reel_seed}) ═══")
     print(f"    {n_shows} shows, {min_dur}–{max_dur}s each")
     print(f"    complexity {min_complexity}–{max_complexity}")
+    if src:
+        print(f"    source: {src.name} ({footage_ratio:.0%} footage)")
+    else:
+        print(f"    generators only (no source footage)")
     print(f"    {width}×{height} @ 30fps")
     print(f"    random transitions ({transition_dur}s)\n")
 
@@ -68,10 +76,14 @@ def show_reel(
         complexity = rng.uniform(min_complexity, max_complexity)
         dur = rng.uniform(min_dur, max_dur)
 
+        # Per-show coin flip: footage or generator
+        use_footage = src and rng.random() < footage_ratio
+
         recipe = random_recipe(
+            src=src if use_footage else None,
             complexity=complexity,
             target_dur=dur,
-            use_generators=True,
+            use_generators=not use_footage,
             n_lanes=1,
             n_segments=1,
             use_transitions=False,
@@ -83,7 +95,8 @@ def show_reel(
         show_tag = hash_recipe(recipe)
         show_path = work / f"show_{i:03d}_{show_tag}.mp4"
 
-        print(f"  show {i:03d} (seed={show_seed}, complexity={complexity:.2f}, "
+        kind = "footage" if use_footage else "generator"
+        print(f"  show {i:03d} (seed={show_seed}, {kind}, complexity={complexity:.2f}, "
               f"{dur:.1f}s):")
         for step in recipe.lanes[0].recipe:
             print(f"    {step}")
@@ -143,6 +156,10 @@ def main():
                         help="Transition duration (seconds)")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--src", type=str, default=None,
+                        help="Source footage (optional — some shows will use it)")
+    parser.add_argument("--footage-ratio", type=float, default=0.4,
+                        help="Fraction of shows that use footage (0.0–1.0)")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("-o", "--output", type=str, default=None)
     args = parser.parse_args()
@@ -157,6 +174,8 @@ def main():
         transition_dur=args.transition_dur,
         width=args.width,
         height=args.height,
+        src=Path(args.src) if args.src else None,
+        footage_ratio=args.footage_ratio,
         seed=args.seed,
         output=out,
     )

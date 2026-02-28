@@ -113,7 +113,7 @@ float hash2(vec2 p) {
 
 vec3 brainWipePalette(float b, float cycle) {
     // Palette stops — deliberately unnatural, neurological, not bioluminescent
-    vec3 c0 = vec3(0.01, 0.0,  0.03);   // near-black, trace violet
+    vec3 c0 = vec3(0.05, 0.02, 0.10);   // dark violet floor
     vec3 c1 = vec3(0.45, 0.0,  0.85);   // deep electric purple
     vec3 c2 = vec3(0.0,  0.75, 1.0);    // hard cyan
     vec3 c3 = vec3(1.0,  1.0,  1.0);    // overload white
@@ -253,6 +253,10 @@ void main() {
         float A     = state.r;
         float B     = state.g;
 
+        // Expand B contrast — raw B clusters in a narrow band (~0.3-0.7).
+        // Stretch to fill the full palette range.
+        float B_vis = smoothstep(0.15, 0.85, B);
+
         // Reaction front: where A is depleted and B is actively consuming.
         // This is the most visually interesting zone — the invasion wavefront.
         float front = A * B * B;  // proportional to reaction rate
@@ -260,15 +264,15 @@ void main() {
         // Time-based palette cycle
         float cycle = fract(color_shift + TIME * color_speed * 0.05);
 
-        // Color from B concentration
-        vec3 col = brainWipePalette(B, cycle);
+        // Color from expanded B concentration
+        vec3 col = brainWipePalette(B_vis, cycle);
 
         // Brighten the reaction front to emphasize wavefronts
         col += vec3(0.6, 0.9, 1.0) * front * 2.5;
 
         // Subtle structure in the "healthy" zones (high A, low B):
-        // very faint purple tint so it's not pure black — feels like neural substrate
-        col += vec3(0.03, 0.0, 0.06) * A * (1.0 - B);
+        // faint purple tint so it's not pure black — feels like neural substrate
+        col += vec3(0.10, 0.04, 0.16) * A * (1.0 - B);
 
         // Clamp — front boost can push past 1
         col = clamp(col, 0.0, 1.0);

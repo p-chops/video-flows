@@ -66,15 +66,15 @@ void main() {
     float f = fbm(p + warpStrength * r + evo_r * 0.5);
     f = 0.5 + 0.5 * f; // remap to [0, 1]
 
-    // Deep abyssal palette: black-blue → deep teal → bioluminescent cold glow
-    vec3 col = mix(vec3(0.01, 0.02, 0.08),
-                   vec3(0.02, 0.15, 0.25),
+    // Deep abyssal palette: dark blue → teal → bioluminescent cold glow
+    vec3 col = mix(vec3(0.03, 0.06, 0.12),
+                   vec3(0.06, 0.28, 0.40),
                    clamp(f * 1.5, 0.0, 1.0));
-    col = mix(col, vec3(0.08, 0.38, 0.42), clamp(f * f * 2.0,      0.0, 1.0));
-    col = mix(col, vec3(0.15, 0.55, 0.5),  clamp(pow(f, 4.0) * 3.0, 0.0, 1.0));
+    col = mix(col, vec3(0.15, 0.55, 0.58), clamp(f * f * 2.0,      0.0, 1.0));
+    col = mix(col, vec3(0.45, 0.90, 0.78), clamp(pow(f, 2.0) * 2.5, 0.0, 1.0));
 
-    // Vignette
-    float vign = 1.0 - dot(uv * 0.5, uv * 0.5);
+    // Vignette — soft, wide bright center
+    float vign = 1.0 - dot(uv * 0.35, uv * 0.35);
     col *= clamp(vign, 0.0, 1.0);
 
     gl_FragColor = vec4(col, 1.0);

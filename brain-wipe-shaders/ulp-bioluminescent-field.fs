@@ -7,7 +7,7 @@
     {
       "NAME": "density",
       "TYPE": "float",
-      "DEFAULT": 0.55,
+      "DEFAULT": 0.75,
       "MIN": 0.0,
       "MAX": 1.0,
       "LABEL": "Density  [organism count]"
@@ -31,7 +31,7 @@
     {
       "NAME": "glow_size",
       "TYPE": "float",
-      "DEFAULT": 0.5,
+      "DEFAULT": 0.8,
       "MIN": 0.0,
       "MAX": 1.0,
       "LABEL": "Glow Size  [organism radius]"
@@ -240,8 +240,8 @@ vec3 particleLayer(
             // Soft exponential falloff — not a hard circle.
             // Core is bright and small; halo extends further and dimmer.
 
-            float core = exp(-dist * dist / (radius * radius * 0.08)) * 0.6;
-            float halo = exp(-dist * dist / (radius * radius * 0.5))  * 0.4;
+            float core = exp(-dist * dist / (radius * radius * 0.15)) * 0.8;
+            float halo = exp(-dist * dist / (radius * radius * 1.5))  * 0.6;
             float shape = core + halo;
 
             // Per-particle color variation
@@ -279,10 +279,16 @@ void main() {
     vec3 col = vec3(0.0);
 
     // ─── Background ──────────────────────────────────────────────────────────
-    // Deep abyss: near-black with faint depth gradient
-    vec3 bgTop    = vec3(0.0,  0.005, 0.015);
-    vec3 bgBottom = vec3(0.01, 0.02,  0.04);
+    // Deep abyss: murky underwater ambient with visible depth
+    vec3 bgTop    = vec3(0.13, 0.21, 0.30);
+    vec3 bgBottom = vec3(0.18, 0.28, 0.38);
     col = mix(bgBottom, bgTop, uv.y);
+
+    // Ambient scatter — light diffusing through murky water
+    float scatter = sin(auv.x * 3.1 + TIME * 0.05) * sin(auv.y * 2.7 - TIME * 0.03)
+                  + sin(auv.x * 1.3 - auv.y * 2.1 + TIME * 0.07) * 0.5;
+    scatter = scatter * 0.5 + 0.5;  // remap to 0-1
+    col += mix(vec3(0.05, 0.12, 0.14), vec3(0.12, 0.07, 0.16), color_temp) * scatter * 0.30;
 
     // ─── Particle Layers ─────────────────────────────────────────────────────
     // Back layers: small, dim, slow, dense (distant organisms)
@@ -297,7 +303,7 @@ void main() {
         float layerScale  = mix(0.06, 0.22, t * t);
         float layerSpeed  = mix(0.6, 1.4, t) * dSpeed;
         float layerGlow   = mix(0.5, 1.5, t) * gSize;
-        float layerBright = mix(0.3, 1.0, t * t);
+        float layerBright = mix(0.7, 1.2, t * t);
 
         // Back layers are denser (more tiny distant organisms)
         float layerDens = mix(dens, dens * 0.5, t);

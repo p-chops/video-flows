@@ -79,7 +79,7 @@
         {
             "NAME": "brightness",
             "TYPE": "float",
-            "DEFAULT": 1.0,
+            "DEFAULT": 0.85,
             "MIN": 0.1,
             "MAX": 2.0,
             "LABEL": "Brightness"
@@ -132,9 +132,9 @@ void main() {
     // Angular stripe
     float ang = fract((a / TAU + 1.0) * angular_freq * 0.5);
 
-    // XOR checkerboard pattern in polar space
-    float d_stripe = step(stripe_balance, depth);
-    float a_stripe = step(stripe_balance, ang);
+    // XOR checkerboard pattern in polar space — smoothstep for gradient edges
+    float d_stripe = smoothstep(stripe_balance - 0.08, stripe_balance + 0.08, depth);
+    float a_stripe = smoothstep(stripe_balance - 0.08, stripe_balance + 0.08, ang);
     float v = abs(d_stripe - a_stripe);
 
     // Depth-tinted hue shift
