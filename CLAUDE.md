@@ -26,7 +26,8 @@ pipeline/
 │   ├── mask.py            # Luma, edge (Canny), motion, chroma, gradient masks
 │   ├── color.py           # normalize_levels, auto_levels — level stretch + gamma correction
 │   ├── glitch.py          # bitrate_crush — codec-based compression artifacts
-│   ├── time.py            # Temporal effects: scrub, drift, ping-pong, echo, patch, slit_scan, temporal_tile, smear, bloom, frame_stack, slip
+│   ├── time.py            # Temporal effects: scrub, drift, ping-pong, echo, patch, slit_scan, temporal_tile, smear, bloom, frame_stack, slip, flow_warp
+│   ├── transform.py       # Spatial/color transforms: mirror, zoom, invert, hue_shift, saturate
 │   └── transition.py      # Transitions: crossfade, luma_wipe, whip_pan, static_burst, flash
 └── flows/                 # Prefect @flow compositions (example pipelines)
     ├── examples.py        # 10 flows: cut-shuffle-shader, deep-color, shader-lab, crush-lab, etc.
@@ -155,6 +156,19 @@ Blend modes use ffmpeg filter names mapped via `FFMPEG_BLEND_MODES` dict. Adding
 | bloom | `bloom` | `sensitivity` | Streaming |
 | frame_stack | `frame_stack` | `window`, `mode` | Ring buffer |
 | slip | `slip` | `n_bands`, `max_slip`, `axis`, `seed` | All frames in RAM |
+| flow_warp | `flow_warp` | `amplify`, `smooth`, `seed` | Streaming (prev frame) |
+
+### Transform Tasks
+
+Tasks in `pipeline/tasks/transform.py`. Pure ffmpeg filter-graph operations.
+
+| Effect | Task | Key params |
+|--------|------|-----------|
+| mirror | `mirror` | `axis` (horizontal/vertical) |
+| zoom | `zoom` | `factor`, `center_x`, `center_y` |
+| invert | `invert` | (none) |
+| hue_shift | `hue_shift` | `degrees` |
+| saturate | `saturate` | `amount` |
 
 ## Recipe System
 
@@ -162,7 +176,7 @@ Blend modes use ffmpeg filter names mapped via `FFMPEG_BLEND_MODES` dict. Adding
 
 A `BrainWipeRecipe` describes: **lanes** (parallel processing streams), **compositing** (how lanes combine), and **post-processing** (final steps). Each lane has a **source** (footage, generator, static, solid), a **recipe** (ordered list of processing steps), and **sequencing** (shuffle, concat, optional static interleaving).
 
-**Step types**: `CrushStep`, `ShaderStep`, `NormalizeStep`, `ScrubStep`, `DriftStep`, `PingPongStep`, `EchoStep`, `PatchStep`, `SlitScanStep`, `TemporalTileStep`, `SmearStep`, `BloomStep`, `StackStep`, `SlipStep`. Adding new step types from labs: add a dataclass to `recipe.py`, add to the `Step` union, add a `case` branch in `_submit_step()` in `brain_wipe.py`.
+**Step types**: `CrushStep`, `ShaderStep`, `NormalizeStep`, `ScrubStep`, `DriftStep`, `PingPongStep`, `EchoStep`, `PatchStep`, `SlitScanStep`, `TemporalTileStep`, `SmearStep`, `BloomStep`, `StackStep`, `SlipStep`, `FlowWarpStep`, `MirrorStep`, `ZoomStep`, `InvertStep`, `HueShiftStep`, `SaturateStep`. Adding new step types from labs: add a dataclass to `recipe.py`, add to the `Step` union, add a `case` branch in `_submit_step()` in `brain_wipe.py`.
 
 **Source types**: `FootageSource` (random or scene-based segmentation), `GeneratorSource` (generator shaders + optional warps), `StaticSource`, `SolidSource`.
 
@@ -301,11 +315,14 @@ Deleted shaders (for reference): chromawave, false_color, plasma_tint, palette_c
 
 Separate shader directory from the glitch/color library. Use `--shader-dir brain-wipe-shaders` with the brain wipe flows, or pass the path as `shader_dir` in Python.
 
-**4 video warpers (have `inputImage`):**
+**7 video warpers (have `inputImage`):**
 - `ulp-warp-fbm` — fractal domain warp (iterative FBM noise, 1–3 passes)
 - `ulp-warp-curl` — curl noise flow (divergence-free, no tearing)
 - `ulp-warp-gravitational` — multi-point gravitational lensing (up to 5 orbiting masses)
 - `ulp-warp-voronoi` — Voronoi cell refraction (convex/concave/edge-push modes)
+- `ulp-warp-kaleidoscope` — angular mirror symmetry (segments, rotation, zoom)
+- `ulp-warp-ripple` — concentric sine-wave displacement (amplitude, frequency, decay)
+- `ulp-warp-twist` — radial spiral distortion (twist amount, radius, falloff)
 
 **7 generators (no `inputImage`):** All tuned for dynamic range (mean 60–140, p5–p95 range >80).
 - `ulp-brain-wipe-plasma` — sinusoidal plasma field
