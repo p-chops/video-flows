@@ -277,6 +277,65 @@ def show_reel(
     return show_reel_render(manifest, cfg=c, cleanup=cleanup)
 
 
+# ── Batch flow ───────────────────────────────────────────────────────────────
+
+@flow(name="show-reel-batch", log_prints=True,
+      task_runner=ConcurrentTaskRunner(max_workers=4))
+def show_reel_batch(
+    n_reels: int = 10,
+    n_shows: int = 8,
+    min_dur: float = 5.0,
+    max_dur: float = 10.0,
+    min_complexity: float = 0.4,
+    max_complexity: float = 0.9,
+    transition_dur: float = 0.5,
+    width: int = 1280,
+    height: int = 720,
+    src: Optional[Path] = None,
+    footage_ratio: float = 0.5,
+    seed: Optional[int] = None,
+    cleanup: bool = True,
+    cfg: Optional[Config] = None,
+) -> list[Path]:
+    """Generate multiple random show reels for curation.
+
+    Each reel gets a unique random seed. Output files are named
+    show_reel_batch_<batch_seed>_<index>.mp4.
+    """
+    c = cfg or Config()
+    c.ensure_dirs()
+
+    batch_rng = random.Random(seed)
+    batch_seed = seed or batch_rng.randint(0, 2**31)
+    batch_rng = random.Random(batch_seed)
+
+    reel_seeds = [batch_rng.randint(0, 2**31) for _ in range(n_reels)]
+
+    print(f"═══ Show Reel Batch (seed={batch_seed}, {n_reels} reels) ═══\n")
+
+    results = []
+    for i, reel_seed in enumerate(reel_seeds):
+        out_path = c.output_dir / f"show_reel_batch_{batch_seed}_{i:03d}.mp4"
+        print(f"──── Reel {i+1}/{n_reels} (seed={reel_seed}) → {out_path.name} ────")
+
+        manifest = _plan_shows(
+            n_shows=n_shows, min_dur=min_dur, max_dur=max_dur,
+            min_complexity=min_complexity, max_complexity=max_complexity,
+            transition_dur=transition_dur, width=width, height=height,
+            src=src, footage_ratio=footage_ratio, seed=reel_seed,
+            output=out_path, cfg=c,
+        )
+        result = show_reel_render(manifest, cfg=c, cleanup=cleanup)
+        results.append(result)
+        print(f"  ✓ reel {i+1}/{n_reels} done: {result.name}\n")
+
+    print(f"\n═══ Batch complete: {len(results)} reels in {c.output_dir}/ ═══")
+    for r in results:
+        print(f"  {r.name}")
+
+    return results
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def _add_plan_args(parser):
@@ -310,7 +369,7 @@ def main():
     import sys
 
     # If the first positional arg isn't a known subcommand, assume "run"
-    _COMMANDS = {"plan", "render", "run"}
+    _COMMANDS = {"plan", "render", "run", "batch"}
     if len(sys.argv) > 1 and sys.argv[1] not in _COMMANDS:
         sys.argv.insert(1, "run")
 
@@ -335,6 +394,11 @@ def main():
     # run — one-shot plan + render (original behaviour)
     p_run = sub.add_parser("run", help="Plan and render in one shot (default)")
     _add_plan_args(p_run)
+
+    # batch — multiple random reels for curation
+    p_batch = sub.add_parser("batch", help="Generate multiple random reels for curation")
+    p_batch.add_argument("n_reels", type=int, help="Number of reels to generate")
+    _add_plan_args(p_batch)
 
     args = parser.parse_args()
 
@@ -383,6 +447,23 @@ def main():
             footage_ratio=args.footage_ratio,
             seed=args.seed,
             output=out,
+            cleanup=not args.no_cleanup,
+        )
+
+    elif args.command == "batch":
+        show_reel_batch(
+            n_reels=args.n_reels,
+            n_shows=args.n_shows,
+            min_dur=args.min_dur,
+            max_dur=args.max_dur,
+            min_complexity=args.min_complexity,
+            max_complexity=args.max_complexity,
+            transition_dur=args.transition_dur,
+            width=args.width,
+            height=args.height,
+            src=Path(args.src) if args.src else None,
+            footage_ratio=args.footage_ratio,
+            seed=args.seed,
             cleanup=not args.no_cleanup,
         )
 
