@@ -736,6 +736,35 @@ def _materialize_generator_source(
     return futures
 
 
+def _scale_segments_to_recipe(
+    segments: list[Path],
+    recipe: BrainWipeRecipe,
+    cfg: Config,
+) -> list[Path]:
+    """Scale footage segments to recipe dimensions if they don't match."""
+    import subprocess
+    target_w, target_h = recipe.width, recipe.height
+    result = []
+    for seg in segments:
+        info = probe(seg, cfg)
+        if info.width == target_w and info.height == target_h:
+            result.append(seg)
+            continue
+        scaled = seg.parent / f"{seg.stem}_scaled{seg.suffix}"
+        subprocess.run([
+            cfg.ffmpeg_bin, "-y", "-loglevel", cfg.ffmpeg_loglevel,
+            "-i", str(seg),
+            "-vf", f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+                   f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2",
+            "-an",
+            "-c:v", cfg.default_codec, "-crf", str(cfg.default_crf),
+            "-pix_fmt", cfg.default_pix_fmt,
+            str(scaled),
+        ], check=True)
+        result.append(scaled)
+    return result
+
+
 def _materialize_source(
     lane,
     lane_idx: int,
@@ -763,7 +792,7 @@ def _materialize_source(
                 if lane.n_segments > 0 and lane.n_segments < len(segments):
                     segments = rng.sample(segments, lane.n_segments)
                 print(f"    {len(segments)} scene segments from {path.name}")
-                return segments
+                return _scale_segments_to_recipe(segments, recipe, cfg)
             else:
                 segments = random_segments(
                     path, lane.n_segments,
@@ -771,7 +800,7 @@ def _materialize_source(
                     output_dir=work / "segments", cfg=cfg,
                 )
                 print(f"    {len(segments)} random segments from {path.name}")
-                return segments
+                return _scale_segments_to_recipe(segments, recipe, cfg)
 
         case GeneratorSource():
             dur_label = (f"{source.min_dur:.0f}s" if source.min_dur == source.max_dur
