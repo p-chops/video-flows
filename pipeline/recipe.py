@@ -547,6 +547,13 @@ def _step_to_dict(s: Step) -> dict:
             return {"type": "saturate", "amount": s.amount}
         case FlowWarpStep():
             return {"type": "flow_warp", "amplify": s.amplify, "smooth": s.smooth}
+        case TemporalSortStep():
+            return {"type": "temporal_sort", "mode": s.mode, "direction": s.direction}
+        case ExtremaHoldStep():
+            return {"type": "extrema_hold", "mode": s.mode, "decay": s.decay}
+        case FeedbackTransformStep():
+            return {"type": "feedback_transform", "transform": s.transform,
+                    "amount": s.amount, "mix": s.mix}
         case _:
             raise ValueError(f"Unknown step type: {type(s).__name__}")
 
@@ -607,6 +614,16 @@ def _step_from_dict(d: dict) -> Step:
     elif t == "flow_warp":
         return FlowWarpStep(amplify=d.get("amplify", 3.0),
                             smooth=d.get("smooth", 15))
+    elif t == "temporal_sort":
+        return TemporalSortStep(mode=d.get("mode", "luminance"),
+                                direction=d.get("direction", "ascending"))
+    elif t == "extrema_hold":
+        return ExtremaHoldStep(mode=d.get("mode", "max"),
+                               decay=d.get("decay", 0.0))
+    elif t == "feedback_transform":
+        return FeedbackTransformStep(transform=d.get("transform", "zoom"),
+                                     amount=d.get("amount", 0.02),
+                                     mix=d.get("mix", 0.7))
     else:
         raise ValueError(f"Unknown step type: {t}")
 
