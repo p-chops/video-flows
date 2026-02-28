@@ -1377,8 +1377,14 @@ def _random_steps(rng: _random_mod.Random, n_steps: int, complexity: float = 0.5
     return steps
 
 
-def _ensure_motion(rng: _random_mod.Random, steps: list[Step]) -> list[Step]:
-    """If no time effects in steps, insert one before the last step."""
+def _ensure_motion(rng: _random_mod.Random, steps: list[Step],
+                    source: Optional[Source] = None) -> list[Step]:
+    """If no time effects in steps, insert one before the last step.
+
+    Skips generator sources — they already have inherent motion from u_time.
+    """
+    if source is not None and isinstance(source, GeneratorSource):
+        return steps
     if any(isinstance(s, _TIME_STEPS) for s in steps):
         return steps
 
@@ -1650,9 +1656,8 @@ def _build_crush_sandwich(
         steps.append(CrushStep(crush=crush_val, codec=codec, downscale=downscale))
         steps.append(_shader_step(rng, complexity))
 
-    steps = _ensure_motion(rng, steps)
-
     source = _random_source(rng, src, use_generators, complexity)
+    steps = _ensure_motion(rng, steps, source)
     lane = _make_lane(rng, source=source, steps=steps, n_segments=actual_segments,
                       wants_transition=wants_transition, seg_target=seg_target)
 
@@ -1795,9 +1800,8 @@ def _build_escalation(
                 ))
             steps.append(_shader_step(rng, complexity, n=max(1, int(1 + progress * 2))))
 
-        steps = _ensure_motion(rng, steps)
-
         source = _random_source(rng, src, use_generators, complexity)
+        steps = _ensure_motion(rng, steps, source)
         lane = _make_lane(rng, source=source, steps=steps, n_segments=actual_segments,
                           wants_transition=wants_transition, seg_target=seg_target)
         return _assemble_recipe([lane], rng=rng, complexity=complexity, src=src,
@@ -1826,9 +1830,8 @@ def _build_escalation(
                     lane_steps.append(CrushStep(crush=rng.uniform(0.9, 1.0),
                                                 codec=rng.choice(_CODECS)))
 
-            lane_steps = _ensure_motion(rng, lane_steps)
-
             source = _random_source(rng, src, use_generators, complexity)
+            lane_steps = _ensure_motion(rng, lane_steps, source)
             lane = _make_lane(rng, source=source, steps=lane_steps,
                               n_segments=actual_segments,
                               wants_transition=wants_transition, seg_target=seg_target)
@@ -1929,10 +1932,9 @@ def _build_palimpsest(
     if complexity > 0.5:
         b_steps.append(_random_time_step(rng, complexity))
 
-    a_steps = _ensure_motion(rng, a_steps)
-
     # Same source for both lanes
     source = _random_source(rng, src, use_generators, complexity)
+    a_steps = _ensure_motion(rng, a_steps, source)
 
     lane_a = _make_lane(rng, source=source, steps=a_steps,
                         n_segments=actual_segments,
@@ -1990,8 +1992,8 @@ def _build_hybrid(
     )
     gen_steps: list[Step] = [_shader_step(rng, complexity, n=1)]
 
-    footage_steps = _ensure_motion(rng, footage_steps)
-    gen_steps = _ensure_motion(rng, gen_steps)
+    footage_steps = _ensure_motion(rng, footage_steps, footage_source)
+    gen_steps = _ensure_motion(rng, gen_steps, gen_source)
 
     lane_a = _make_lane(rng, source=footage_source, steps=footage_steps,
                         n_segments=actual_segments,
@@ -2038,7 +2040,7 @@ def _build_grab_bag(
         source = _random_source(rng, src, use_generators, complexity)
         if seg_target is not None:
             source = _override_source_dur(source, seg_target)
-        steps = _ensure_motion(rng, _random_steps(rng, lane_steps, complexity))
+        steps = _ensure_motion(rng, _random_steps(rng, lane_steps, complexity), source)
         sequencing = "shuffle" if rng.random() < 0.6 else "concat"
         transition = _random_transition(rng) if wants_transition else None
         lanes.append(Lane(
@@ -2073,9 +2075,8 @@ def _build_stutter(
     # Light processing per segment — let the cuts do the work
     n_st = n_steps or max(1, int(1 + complexity * 2))
     steps = _random_steps(rng, n_st, complexity)
-    steps = _ensure_motion(rng, steps)
-
     source = _random_source(rng, src, use_generators, complexity)
+    steps = _ensure_motion(rng, steps, source)
     source = _override_source_dur(source, seg_dur)
 
     # Always shuffle for maximum discontinuity
