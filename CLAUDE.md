@@ -17,19 +17,22 @@ pipeline/
 ├── ffmpeg.py              # All video I/O: probe, read_frames, FrameWriter, extract, concat
 ├── gl.py                  # moderngl standalone context, FBO ping-pong, quad geometry
 ├── isf.py                 # ISF v2 parser + GLSL translator
+├── cache.py               # Prefect cache policy — FileValidatedInputs (re-run if dst missing)
 ├── tasks/                 # Prefect @task functions (the building blocks)
 │   ├── cut.py             # Scene detection, segment extraction
 │   ├── sequence.py        # Concat, shuffle, interleave, generate static/solid
 │   ├── shader.py          # Apply ISF shaders to video via moderngl
-│   ├── composite.py       # Blend modes, masked composite, multi-layer, chromakey
+│   ├── composite.py       # Blend, masked composite, multi-layer, PIP, chromakey
 │   ├── mask.py            # Luma, edge (Canny), motion, chroma, gradient masks
 │   ├── color.py           # normalize_levels — percentile-based level stretch
-│   └── glitch.py          # bitrate_crush — codec-based compression artifacts
+│   ├── glitch.py          # bitrate_crush — codec-based compression artifacts
+│   └── time.py            # Temporal effects: scrub, drift, ping-pong, echo, patch
 └── flows/                 # Prefect @flow compositions (example pipelines)
     ├── examples.py        # 10 flows: cut-shuffle-shader, deep-color, shader-lab, crush-lab, etc.
     ├── stooges.py         # Multi-channel CRT TV content (crush sandwich + parallel)
     ├── brain_wipe.py      # Meta-flow + warp chains + long-form brain wipe renders
-    └── compositing_lab.py # Random layer compositing experiments
+    ├── compositing_lab.py # Random layer compositing experiments
+    └── time_lab.py        # Time effect lab flows + CLI
 ```
 
 Tasks are atomic Prefect `@task` functions. Flows are `@flow` functions that compose tasks into pipelines. New workflows should follow the same pattern: write tasks for new primitives, compose them in flows.
@@ -73,9 +76,17 @@ Known ISF host quirks (from Magic Music Visuals testing):
 - Persistent buffer temporal feedback doesn't work in all hosts — stateless mathematical approaches (recursive zoom loops, etc.) are more portable
 - When seeding reaction-diffusion or other sim shaders, full-field random initialization works better than sparse single-pixel seeds (isolated pixels lack critical mass and diffuse away)
 
-## Blend Modes
+## Compositing
 
-Available in `composite.py`: `normal`, `add`, `multiply`, `screen`, `overlay`, `difference`, `softlight`. All operate on float32 [0,1] arrays. Adding new modes: write a function `_blend_foo(a, b, opacity) -> np.ndarray` and add it to the `BLEND_MODES` dict.
+`composite.py` provides five tasks:
+
+- **`blend_layers`** — blend two videos via ffmpeg's blend filter (modes: normal, add, multiply, screen, overlay, difference, softlight)
+- **`masked_composite`** — composite overlay onto base using a grayscale mask video (ffmpeg maskedmerge)
+- **`multi_layer_composite`** — chain multiple layers bottom-to-top via ffmpeg blend filters
+- **`picture_in_picture`** — scale and position overlay at (x, y) on base (ffmpeg overlay filter)
+- **`chromakey_composite`** — HSV-based colour removal (frame-by-frame Python/OpenCV, the only non-ffmpeg composite task)
+
+Blend modes use ffmpeg filter names mapped via `FFMPEG_BLEND_MODES` dict. Adding a new mode: add the mapping to the dict (ffmpeg blend mode names may differ from common names, e.g. `"add"` → `"addition"`).
 
 ## Adding New Capabilities
 
@@ -83,7 +94,7 @@ Available in `composite.py`: `normal`, `add`, `multiply`, `screen`, `overlay`, `
 
 **New flow**: Add a function in `pipeline/flows/`, decorate with `@flow(name="kebab-case-name")`. Compose existing tasks. Call `cfg.ensure_dirs()` early. Export from `flows/__init__.py`.
 
-**New blend mode**: Add a `_blend_*` function to `composite.py` and register it in `BLEND_MODES`.
+**New blend mode**: Add the ffmpeg blend mode name to `FFMPEG_BLEND_MODES` dict in `composite.py`.
 
 **New mask type**: Add a `@task` to `mask.py`. Output 3-channel grayscale video (white=include, black=exclude).
 
@@ -178,20 +189,26 @@ Deleted shaders (for reference): chromawave, false_color, plasma_tint, palette_c
 
 Separate shader directory from the glitch/color library. Use `--shader-dir brain-wipe-shaders` with the brain wipe flows, or pass the path as `shader_dir` in Python.
 
-**Currently present (4 video warpers — have `inputImage`):**
+**4 video warpers (have `inputImage`):**
 - `ulp-warp-fbm` — fractal domain warp (iterative FBM noise, 1–3 passes)
 - `ulp-warp-curl` — curl noise flow (divergence-free, no tearing)
 - `ulp-warp-gravitational` — multi-point gravitational lensing (up to 5 orbiting masses)
 - `ulp-warp-voronoi` — Voronoi cell refraction (convex/concave/edge-push modes)
 
+**7 generators (no `inputImage`):**
+- `ulp-brain-wipe-plasma` — sinusoidal plasma field
+- `ulp-brain-wipe-tunnel` — infinite geometric tunnel
+- `ulp-brain-wipe-chladni` — vibrating plate resonance figures
+- `ulp-brain-wipe-rd` — reaction-diffusion simulator (brightest generator)
+- `ulp-abyssal-jellies-v4` — bioluminescent jellyfish swarm
+- `ulp-bioluminescent-field` — deep-sea bioluminescence
+- `abyssal_drift` — deep-sea ambient drift
+
 **Planned but not yet written:**
-- `ulp-brain-wipe-plasma` — sinusoidal plasma field (generator)
-- `ulp-brain-wipe-tunnel` — infinite geometric tunnel (generator)
-- `ulp-brain-wipe-chladni` — vibrating plate resonance figures (generator)
 - `ulp-brain-wipe-tunnel-video` — maps video onto tunnel surface (warper)
 - `ulp-brain-wipe-chladni-video` — Chladni gradient displacement (warper)
 
-All are tagged `"Warp"` or `"Brain Wipe"` in ISF `CATEGORIES` and compatible with Magic Music Visuals for live use.
+All are tagged `"Warp"`, `"Brain Wipe"`, or `"Generator"` in ISF `CATEGORIES` and compatible with Magic Music Visuals for live use.
 
 ### Shader categories and filtering
 
@@ -199,10 +216,6 @@ Shaders declare categories in their ISF `CATEGORIES` header array. The `filter_s
 
 ## Known Issues / TODO
 
-- `FrameWriter` constructor signature inconsistency: `sequence.py` passes `(dst, width, height, fps=fps, cfg=c)` while `ffmpeg.py` defines `__init__(self, path, info, cfg)` expecting a `VideoInfo`. One of these needs to be reconciled — the tasks assume width/height/fps kwargs but the class takes a VideoInfo object.
-- `GLContext.texture()` requires `data` arg in its signature but `shader.py` calls `gl.texture(w, h)` without data. Needs a default `data=None` or the call needs updating.
-- `GLContext` constructor doesn't accept `(w, h)` but `shader.py` calls `GLContext(w, h)`. Needs reconciling.
-- Multi-pass ISF shaders (persistent buffers) are parsed but not fully rendered — `shader.py` currently does single-pass-per-shader chaining only. Adding multi-pass support would require per-shader FBO management keyed to pass targets.
 - No audio passthrough — all tasks strip audio (`-an`). This is intentional for now (visual processing only) but could be added via ffmpeg's `-c:a copy` flag.
 - Work directory cleanup is not automatic. Intermediate files accumulate in `work/`.
 

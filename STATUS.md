@@ -199,6 +199,39 @@ python -m pipeline.flows.compositing_lab \
 ### Tasks added
 
 - `picture_in_picture` in `composite.py` — ffmpeg overlay filter, scales overlay to fraction of base width, positions at (x, y)
+- `chromakey_composite` in `composite.py` — HSV-based colour removal (frame-by-frame Python/OpenCV), reveals base through keyed-out regions of overlay
+
+## Time Lab: Complete
+
+`pipeline/tasks/time.py` — five temporal manipulation tasks. `pipeline/flows/time_lab.py` — individual lab flows + CLI (`python -m pipeline.flows.time_lab <subcommand>`).
+
+All effects preserve duration (same length in, same length out).
+
+### Effects
+
+| Effect | Task | Key params | Memory model |
+|--------|------|-----------|--------------|
+| **scrub** | `time_scrub` | `smoothness`, `intensity`, `seed` | All frames in RAM |
+| **drift** | `drift_loop` | `loop_dur`, `drift`, `seed` | All frames in RAM |
+| **pingpong** | `ping_pong` | `window`, `seed` | All frames in RAM |
+| **echo** | `echo_trail` | `delay`, `trail` | Ring buffer (delay_frames) |
+| **patch** | `time_patch` | `patch_min`, `patch_max`, `seed` | Streaming (1 canvas) |
+
+All five effects promoted to recipe step types (`ScrubStep`, `DriftStep`, `PingPongStep`, `EchoStep`, `PatchStep`) — usable in any lane recipe or post-processing chain.
+
+### CLI
+
+```
+python -m pipeline.flows.time_lab scrub source.mp4 --intensity 0.7 --seed 42
+python -m pipeline.flows.time_lab drift source.mp4 --loop-dur 3.0 --seed 42
+python -m pipeline.flows.time_lab pingpong source.mp4 --window 2.0 --seed 42
+python -m pipeline.flows.time_lab echo source.mp4 --delay 0.1 --trail 0.85
+python -m pipeline.flows.time_lab patch source.mp4 --patch-min 0.05 --patch-max 0.4 --seed 42
+```
+
+## Cache Policy: FileValidatedInputs
+
+`pipeline/cache.py` — custom Prefect cache policy `FileValidatedInputs`. Extends `Inputs` to invalidate cached task results when the output file (`dst`) is missing on disk. If work directory was cleaned between runs, tasks re-execute automatically instead of returning stale cache hits. Used across all tasks via `FILE_VALIDATED_INPUTS` constant.
 
 ## Crush Task: Fixed and Tuned
 
