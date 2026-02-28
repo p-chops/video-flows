@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random as _random_mod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -38,7 +39,8 @@ class FootageSource:
 @dataclass
 class GeneratorSource:
     """Synthesize segments via generator shaders (no source footage)."""
-    duration: float = 20.0
+    min_dur: float = 15.0
+    max_dur: float = 25.0
     n_warps: int = 0              # warp shaders chained after generator
     warp_categories: list[str] = field(
         default_factory=lambda: ["Warp", "Brain Wipe"],
@@ -47,12 +49,14 @@ class GeneratorSource:
 @dataclass
 class StaticSource:
     """Generate random noise video."""
-    duration: float = 10.0
+    min_dur: float = 8.0
+    max_dur: float = 12.0
 
 @dataclass
 class SolidSource:
     """Generate a solid-colour clip."""
-    duration: float = 10.0
+    min_dur: float = 8.0
+    max_dur: float = 12.0
     color: tuple[int, int, int] = (0, 0, 0)
 
 SourceSpec = FootageSource | GeneratorSource | StaticSource | SolidSource
@@ -223,12 +227,15 @@ def _source_label(source: SourceSpec) -> str:
     match source:
         case FootageSource(path=p, method=m):
             return f"footage({p.name}, {m})"
-        case GeneratorSource(duration=d, n_warps=nw):
-            return f"generator({d:.0f}s, {nw} warps)"
-        case StaticSource(duration=d):
-            return f"static({d:.0f}s)"
-        case SolidSource(duration=d, color=c):
-            return f"solid({d:.0f}s, rgb{c})"
+        case GeneratorSource(min_dur=lo, max_dur=hi, n_warps=nw):
+            dur = f"{lo:.0f}s" if lo == hi else f"{lo:.0f}–{hi:.0f}s"
+            return f"generator({dur}, {nw} warps)"
+        case StaticSource(min_dur=lo, max_dur=hi):
+            dur = f"{lo:.0f}s" if lo == hi else f"{lo:.0f}–{hi:.0f}s"
+            return f"static({dur})"
+        case SolidSource(min_dur=lo, max_dur=hi, color=c):
+            dur = f"{lo:.0f}s" if lo == hi else f"{lo:.0f}–{hi:.0f}s"
+            return f"solid({dur}, rgb{c})"
         case _:
             return type(source).__name__
 
@@ -317,11 +324,11 @@ def _recipe_to_hashable(recipe: BrainWipeRecipe) -> str:
             case FootageSource():
                 return {"type": "footage", "path": str(src.path), "method": src.method}
             case GeneratorSource():
-                return {"type": "generator", "dur": src.duration, "warps": src.n_warps}
+                return {"type": "generator", "min_dur": src.min_dur, "max_dur": src.max_dur, "warps": src.n_warps}
             case StaticSource():
-                return {"type": "static", "dur": src.duration}
+                return {"type": "static", "min_dur": src.min_dur, "max_dur": src.max_dur}
             case SolidSource():
-                return {"type": "solid", "dur": src.duration, "color": list(src.color)}
+                return {"type": "solid", "min_dur": src.min_dur, "max_dur": src.max_dur, "color": list(src.color)}
             case _:
                 return {"type": type(src).__name__}
 
@@ -352,6 +359,232 @@ def hash_recipe(recipe: BrainWipeRecipe) -> str:
     """Return an 8-char hex hash of the recipe for output naming."""
     raw = _recipe_to_hashable(recipe)
     return hashlib.sha1(raw.encode()).hexdigest()[:8]
+
+
+# ─── Serialization ───────────────────────────────────────────────────────────
+
+def _step_to_dict(s: Step) -> dict:
+    match s:
+        case CrushStep():
+            return {"type": "crush", "crush": s.crush,
+                    "codec": s.codec, "downscale": s.downscale}
+        case ShaderStep():
+            return {"type": "shader",
+                    "shader_paths": [str(p) for p in s.shader_paths] if s.shader_paths else None,
+                    "n_shaders": s.n_shaders,
+                    "categories": s.categories,
+                    "shader_dir": str(s.shader_dir) if s.shader_dir else None}
+        case NormalizeStep():
+            return {"type": "normalize", "black_point": s.black_point,
+                    "white_point": s.white_point}
+        case ScrubStep():
+            return {"type": "scrub", "smoothness": s.smoothness,
+                    "intensity": s.intensity}
+        case DriftStep():
+            return {"type": "drift", "loop_dur": s.loop_dur, "drift": s.drift}
+        case PingPongStep():
+            return {"type": "pingpong", "window": s.window}
+        case EchoStep():
+            return {"type": "echo", "delay": s.delay, "trail": s.trail}
+        case PatchStep():
+            return {"type": "patch", "patch_min": s.patch_min,
+                    "patch_max": s.patch_max}
+        case _:
+            raise ValueError(f"Unknown step type: {type(s).__name__}")
+
+
+def _step_from_dict(d: dict) -> Step:
+    t = d["type"]
+    if t == "crush":
+        return CrushStep(crush=d["crush"], codec=d["codec"],
+                         downscale=d.get("downscale", 1.0))
+    elif t == "shader":
+        return ShaderStep(
+            shader_paths=[Path(p) for p in d["shader_paths"]] if d.get("shader_paths") else None,
+            n_shaders=d.get("n_shaders", 3),
+            categories=d.get("categories"),
+            shader_dir=Path(d["shader_dir"]) if d.get("shader_dir") else None,
+        )
+    elif t == "normalize":
+        return NormalizeStep(black_point=d.get("black_point", 0.01),
+                             white_point=d.get("white_point", 0.99))
+    elif t == "scrub":
+        return ScrubStep(smoothness=d["smoothness"], intensity=d["intensity"])
+    elif t == "drift":
+        return DriftStep(loop_dur=d["loop_dur"], drift=d.get("drift"))
+    elif t == "pingpong":
+        return PingPongStep(window=d["window"])
+    elif t == "echo":
+        return EchoStep(delay=d["delay"], trail=d["trail"])
+    elif t == "patch":
+        return PatchStep(patch_min=d["patch_min"], patch_max=d["patch_max"])
+    else:
+        raise ValueError(f"Unknown step type: {t}")
+
+
+def _source_to_dict(src: SourceSpec) -> dict:
+    match src:
+        case FootageSource():
+            return {"type": "footage", "path": str(src.path),
+                    "method": src.method,
+                    "min_dur": src.min_dur, "max_dur": src.max_dur}
+        case GeneratorSource():
+            return {"type": "generator",
+                    "min_dur": src.min_dur, "max_dur": src.max_dur,
+                    "n_warps": src.n_warps,
+                    "warp_categories": src.warp_categories}
+        case StaticSource():
+            return {"type": "static",
+                    "min_dur": src.min_dur, "max_dur": src.max_dur}
+        case SolidSource():
+            return {"type": "solid",
+                    "min_dur": src.min_dur, "max_dur": src.max_dur,
+                    "color": list(src.color)}
+        case _:
+            raise ValueError(f"Unknown source type: {type(src).__name__}")
+
+
+def _source_from_dict(d: dict) -> SourceSpec:
+    t = d["type"]
+    if t == "footage":
+        return FootageSource(
+            path=Path(d["path"]), method=d.get("method", "random"),
+            min_dur=d.get("min_dur", 5.0), max_dur=d.get("max_dur", 30.0),
+        )
+    elif t == "generator":
+        return GeneratorSource(
+            min_dur=d.get("min_dur", 15.0), max_dur=d.get("max_dur", 25.0),
+            n_warps=d.get("n_warps", 0),
+            warp_categories=d.get("warp_categories", ["Warp", "Brain Wipe"]),
+        )
+    elif t == "static":
+        return StaticSource(
+            min_dur=d.get("min_dur", 8.0), max_dur=d.get("max_dur", 12.0),
+        )
+    elif t == "solid":
+        return SolidSource(
+            min_dur=d.get("min_dur", 8.0), max_dur=d.get("max_dur", 12.0),
+            color=tuple(d.get("color", [0, 0, 0])),
+        )
+    else:
+        raise ValueError(f"Unknown source type: {t}")
+
+
+def _transition_to_dict(t: TransitionSpec) -> dict:
+    return {
+        "type": t.type, "duration": t.duration,
+        "pattern": t.pattern, "softness": t.softness, "angle": t.angle,
+        "direction": t.direction, "blur_strength": t.blur_strength,
+        "decay": t.decay,
+    }
+
+
+def _transition_from_dict(d: dict) -> TransitionSpec:
+    return TransitionSpec(
+        type=d.get("type", "crossfade"),
+        duration=d.get("duration", 1.0),
+        pattern=d.get("pattern", "horizontal"),
+        softness=d.get("softness", 0.1),
+        angle=d.get("angle", 0.0),
+        direction=d.get("direction", "left"),
+        blur_strength=d.get("blur_strength", 0.5),
+        decay=d.get("decay", 3.0),
+    )
+
+
+def _composite_to_dict(c: CompositeSpec) -> dict:
+    match c:
+        case BlendComposite():
+            return {"type": "blend", "mode": c.mode, "opacity": c.opacity}
+        case MaskedComposite():
+            return {"type": "masked", "mask_type": c.mask_type,
+                    "mask_params": c.mask_params}
+        case RandomComposite():
+            return {"type": "random", "n_ops": c.n_ops}
+        case _:
+            raise ValueError(f"Unknown composite type: {type(c).__name__}")
+
+
+def _composite_from_dict(d: dict) -> CompositeSpec:
+    t = d["type"]
+    if t == "blend":
+        return BlendComposite(mode=d.get("mode", "screen"),
+                               opacity=d.get("opacity", 0.5))
+    elif t == "masked":
+        return MaskedComposite(mask_type=d.get("mask_type", "luma"),
+                                mask_params=d.get("mask_params", {}))
+    elif t == "random":
+        return RandomComposite(n_ops=d.get("n_ops", 3))
+    else:
+        raise ValueError(f"Unknown composite type: {t}")
+
+
+def recipe_to_dict(recipe: BrainWipeRecipe) -> dict:
+    """Serialize a recipe to a plain dict (JSON-safe)."""
+    return {
+        "lanes": [
+            {
+                "source": _source_to_dict(l.source),
+                "n_segments": l.n_segments,
+                "recipe": [_step_to_dict(s) for s in l.recipe],
+                "sequencing": l.sequencing,
+                "static_gap": l.static_gap,
+                "transition": _transition_to_dict(l.transition) if l.transition else None,
+            }
+            for l in recipe.lanes
+        ],
+        "composite": _composite_to_dict(recipe.composite) if recipe.composite else None,
+        "post": [_step_to_dict(s) for s in recipe.post],
+        "width": recipe.width,
+        "height": recipe.height,
+        "fps": recipe.fps,
+        "seed": recipe.seed,
+        "shader_dir": str(recipe.shader_dir) if recipe.shader_dir else None,
+        "brain_wipe_dir": str(recipe.brain_wipe_dir),
+    }
+
+
+def recipe_from_dict(d: dict) -> BrainWipeRecipe:
+    """Deserialize a recipe from a plain dict."""
+    lanes = []
+    for ld in d["lanes"]:
+        lanes.append(Lane(
+            source=_source_from_dict(ld["source"]),
+            n_segments=ld["n_segments"],
+            recipe=[_step_from_dict(s) for s in ld["recipe"]],
+            sequencing=ld.get("sequencing", "shuffle"),
+            static_gap=ld.get("static_gap", 0.0),
+            transition=_transition_from_dict(ld["transition"]) if ld.get("transition") else None,
+        ))
+
+    composite = _composite_from_dict(d["composite"]) if d.get("composite") else None
+
+    return BrainWipeRecipe(
+        lanes=lanes,
+        composite=composite,
+        post=[_step_from_dict(s) for s in d.get("post", [])],
+        width=d.get("width", 1920),
+        height=d.get("height", 1080),
+        fps=d.get("fps", 30.0),
+        seed=d.get("seed"),
+        shader_dir=Path(d["shader_dir"]) if d.get("shader_dir") else None,
+        brain_wipe_dir=Path(d.get("brain_wipe_dir", "brain-wipe-shaders")),
+    )
+
+
+def save_recipe(recipe: BrainWipeRecipe, path: Path) -> Path:
+    """Save a recipe to a JSON file. Returns the path."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = recipe_to_dict(recipe)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return path
+
+
+def load_recipe(path: Path) -> BrainWipeRecipe:
+    """Load a recipe from a JSON file."""
+    data = json.loads(Path(path).read_text())
+    return recipe_from_dict(data)
 
 
 # ─── Recipe builders ──────────────────────────────────────────────────────────
@@ -446,7 +679,7 @@ def generator_render_recipe(
     return BrainWipeRecipe(
         lanes=[Lane(
             source=GeneratorSource(
-                duration=segment_dur,
+                min_dur=segment_dur, max_dur=segment_dur,
                 n_warps=max_warps,
                 warp_categories=["Warp", "Brain Wipe"],
             ),
@@ -604,7 +837,7 @@ def hybrid_composite_recipe(
             ),
             Lane(
                 source=GeneratorSource(
-                    duration=segment_dur,
+                    min_dur=segment_dur, max_dur=segment_dur,
                     n_warps=n_warps,
                 ),
                 n_segments=n_segments,
@@ -795,7 +1028,7 @@ def generator_stooges_recipe(
     return BrainWipeRecipe(
         lanes=[
             Lane(
-                source=GeneratorSource(duration=segment_dur, n_warps=n_warps),
+                source=GeneratorSource(min_dur=segment_dur, max_dur=segment_dur, n_warps=n_warps),
                 n_segments=count,
                 recipe=steps,
                 sequencing="shuffle",
@@ -845,7 +1078,7 @@ def gradient_dissolve_recipe(
                 sequencing="shuffle",
             ),
             Lane(
-                source=GeneratorSource(duration=segment_dur, n_warps=n_warps),
+                source=GeneratorSource(min_dur=segment_dur, max_dur=segment_dur, n_warps=n_warps),
                 n_segments=n_segments,
                 recipe=[NormalizeStep()],
                 sequencing="shuffle",
@@ -1015,5 +1248,342 @@ def dissolve_dream_recipe(
                 pattern="radial", softness=0.3,
             ),
         )],
+        seed=seed,
+    )
+
+
+# ─── Procedural recipe generator ─────────────────────────────────────────────
+
+_STEP_POOL: list[tuple[type, int]] = [
+    (ShaderStep, 5),
+    (CrushStep, 3),
+    (ScrubStep, 2),
+    (DriftStep, 2),
+    (PingPongStep, 2),
+    (EchoStep, 2),
+    (PatchStep, 2),
+]
+
+_TIME_STEPS = (ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep)
+
+_TRANSITION_POOL: list[tuple[str, int]] = [
+    ("crossfade", 4),
+    ("luma_wipe", 3),
+    ("whip_pan", 2),
+    ("static_burst", 2),
+    ("flash", 2),
+]
+
+_WIPE_PATTERNS = [
+    "horizontal", "vertical", "radial", "diagonal",
+    "directional", "noise", "star",
+]
+
+_BLEND_MODES = ["screen", "overlay", "difference", "softlight", "add", "multiply"]
+
+_MASK_TYPES = ["luma", "edge", "motion", "gradient"]
+
+_CODECS = ["libx264", "mpeg2video", "mpeg4"]
+
+_WHIP_DIRS = ["left", "right", "up", "down"]
+
+
+def _weighted_choice(rng: _random_mod.Random, pool: list[tuple[Any, int]]) -> Any:
+    """Pick from a weighted pool."""
+    items, weights = zip(*pool)
+    total = sum(weights)
+    r = rng.random() * total
+    cumulative = 0
+    for item, w in zip(items, weights):
+        cumulative += w
+        if r <= cumulative:
+            return item
+    return items[-1]
+
+
+def _random_step(rng: _random_mod.Random) -> Step:
+    """Generate a single random step with randomized parameters."""
+    cls = _weighted_choice(rng, _STEP_POOL)
+    if cls is ShaderStep:
+        return ShaderStep(n_shaders=rng.randint(1, 4))
+    elif cls is CrushStep:
+        return CrushStep(
+            crush=rng.uniform(0.5, 1.0),
+            codec=rng.choice(_CODECS),
+            downscale=rng.choice([1.0, 1.0, 1.0, 2.0, 4.0]),
+        )
+    elif cls is ScrubStep:
+        return ScrubStep(
+            smoothness=rng.uniform(1.0, 4.0),
+            intensity=rng.uniform(0.2, 0.8),
+        )
+    elif cls is DriftStep:
+        return DriftStep(loop_dur=rng.uniform(0.3, 1.5))
+    elif cls is PingPongStep:
+        return PingPongStep(window=rng.uniform(0.3, 1.5))
+    elif cls is EchoStep:
+        delay = 0.0 if rng.random() < 0.4 else rng.uniform(0.02, 0.3)
+        return EchoStep(delay=delay, trail=rng.uniform(0.5, 0.9))
+    else:  # PatchStep
+        mn = rng.uniform(0.03, 0.15)
+        return PatchStep(patch_min=mn, patch_max=rng.uniform(mn + 0.1, 0.5))
+
+
+def _random_steps(rng: _random_mod.Random, n_steps: int) -> list[Step]:
+    """Generate a random processing recipe with constraints."""
+    steps = [_random_step(rng) for _ in range(n_steps)]
+
+    # Constraint: at most 2 crush steps
+    crush_count = 0
+    filtered = []
+    for s in steps:
+        if isinstance(s, CrushStep):
+            crush_count += 1
+            if crush_count > 2:
+                filtered.append(_random_step(rng))  # replace with something else
+                continue
+        filtered.append(s)
+    steps = filtered
+
+    # Constraint: at most 2 time effects
+    time_count = 0
+    filtered = []
+    for s in steps:
+        if isinstance(s, _TIME_STEPS):
+            time_count += 1
+            if time_count > 2:
+                filtered.append(ShaderStep(n_shaders=rng.randint(1, 3)))
+                continue
+        filtered.append(s)
+    steps = filtered
+
+    # Guarantee at least 1 shader step
+    if not any(isinstance(s, ShaderStep) for s in steps):
+        pos = rng.randint(0, max(0, len(steps) - 1))
+        steps.insert(pos, ShaderStep(n_shaders=rng.randint(1, 3)))
+
+    # Maybe append normalize (60% chance)
+    if rng.random() < 0.6 and not any(isinstance(s, NormalizeStep) for s in steps):
+        steps.append(NormalizeStep())
+
+    return steps
+
+
+def _random_source(
+    rng: _random_mod.Random,
+    src: Optional[Path],
+    use_generators: Optional[bool],
+) -> SourceSpec:
+    """Pick a random source type."""
+    if src is not None and use_generators is not True:
+        roll = rng.random()
+        if roll < 0.70 or use_generators is False:
+            return FootageSource(
+                src, method=rng.choice(["random", "scene"]),
+            )
+        elif roll < 0.90:
+            lo = rng.uniform(8, 15)
+            return GeneratorSource(
+                min_dur=lo, max_dur=lo + rng.uniform(5, 20),
+                n_warps=rng.randint(0, 3),
+            )
+        else:
+            lo = rng.uniform(4, 8)
+            return StaticSource(min_dur=lo, max_dur=lo + rng.uniform(3, 10))
+    else:
+        # No source footage — generators only
+        if rng.random() < 0.80:
+            lo = rng.uniform(8, 15)
+            return GeneratorSource(
+                min_dur=lo, max_dur=lo + rng.uniform(5, 20),
+                n_warps=rng.randint(1, 4),
+            )
+        else:
+            lo = rng.uniform(4, 8)
+            return StaticSource(min_dur=lo, max_dur=lo + rng.uniform(3, 10))
+
+
+def _random_transition(rng: _random_mod.Random) -> TransitionSpec:
+    """Generate a random transition spec."""
+    t_type = _weighted_choice(rng, _TRANSITION_POOL)
+
+    if t_type == "crossfade":
+        return TransitionSpec(type="crossfade", duration=rng.uniform(0.5, 2.0))
+    elif t_type == "luma_wipe":
+        return TransitionSpec(
+            type="luma_wipe",
+            duration=rng.uniform(0.5, 2.0),
+            pattern=rng.choice(_WIPE_PATTERNS),
+            softness=rng.uniform(0.05, 0.4),
+            angle=rng.uniform(0, 360) if rng.random() < 0.3 else 0.0,
+        )
+    elif t_type == "whip_pan":
+        return TransitionSpec(
+            type="whip_pan",
+            duration=rng.uniform(0.3, 0.8),
+            direction=rng.choice(_WHIP_DIRS),
+            blur_strength=rng.uniform(0.3, 0.8),
+        )
+    elif t_type == "static_burst":
+        return TransitionSpec(
+            type="static_burst",
+            duration=rng.uniform(0.2, 0.5),
+        )
+    else:  # flash
+        return TransitionSpec(
+            type="flash",
+            duration=rng.uniform(0.3, 0.8),
+            decay=rng.uniform(2.0, 5.0),
+        )
+
+
+def _random_composite(rng: _random_mod.Random) -> CompositeSpec:
+    """Pick a random compositing method for multi-lane recipes."""
+    if rng.random() < 0.5:
+        return BlendComposite(
+            mode=rng.choice(_BLEND_MODES),
+            opacity=rng.uniform(0.3, 0.7),
+        )
+    else:
+        return MaskedComposite(mask_type=rng.choice(_MASK_TYPES))
+
+
+def _random_post(rng: _random_mod.Random) -> list[Step]:
+    """Generate random post-processing steps (light touch).
+
+    No shaders here — a global shader pass drowns out per-segment variety.
+    Post is for subtle temporal effects and level correction only.
+    """
+    steps: list[Step] = []
+    # Maybe a light echo (motion blur, not distinct echoes)
+    if rng.random() < 0.2:
+        steps.append(EchoStep(delay=0.0, trail=rng.uniform(0.5, 0.8)))
+    # Almost always normalize at end
+    if rng.random() < 0.85:
+        steps.append(NormalizeStep())
+    return steps
+
+
+def random_recipe(
+    src: Optional[Path] = None,
+    *,
+    complexity: float = 0.5,
+    target_dur: Optional[float] = None,
+    n_lanes: Optional[int] = None,
+    n_steps: Optional[int] = None,
+    n_segments: Optional[int] = None,
+    use_transitions: Optional[bool] = None,
+    use_generators: Optional[bool] = None,
+    seed: Optional[int] = None,
+) -> BrainWipeRecipe:
+    """Procedurally generate a recipe from all available components.
+
+    complexity: 0.0 (simple) to 1.0 (wild). Scales number of lanes, steps,
+                segments, and probability of transitions/compositing.
+    target_dur: approximate output duration in seconds. Computes per-segment
+                durations to hit this target (±30% variation per segment).
+                Not frame-accurate — transitions, scene detection, etc. shift
+                the final length. None = use default duration ranges.
+    Granular overrides (n_lanes, n_steps, etc.) pin specific choices;
+    everything else is still derived from complexity.
+    src: source footage path. None = pure generator/synthetic mode.
+    """
+    complexity = max(0.0, min(1.0, complexity))
+    rng = _random_mod.Random(seed)
+
+    # Derive parameters from complexity (unless overridden)
+    actual_lanes = n_lanes or max(1, int(1 + complexity * 3 * rng.random()))
+    seg_lo = 3 + int(complexity * 5)
+    seg_hi = 5 + int(complexity * 11)
+    actual_segments = n_segments or rng.randint(seg_lo, seg_hi)
+
+    p_transition = 0.2 + 0.6 * complexity
+    wants_transition = use_transitions if use_transitions is not None else (
+        rng.random() < p_transition
+    )
+    p_post = 0.1 + 0.6 * complexity
+    wants_post = rng.random() < p_post
+
+    # Compute per-segment duration target from target_dur
+    seg_dur_target: Optional[float] = None
+    if target_dur is not None:
+        # Account for transition overlap: each transition eats ~duration seconds
+        # between (n_segments - 1) pairs
+        n_transitions = actual_segments - 1 if wants_transition else 0
+        # Estimate average transition duration (weighted mean of pool)
+        avg_trans_dur = 1.0  # rough average across transition types
+        overlap = n_transitions * avg_trans_dur
+        effective_dur = target_dur + overlap
+        seg_dur_target = max(3.0, effective_dur / max(actual_segments, 1))
+
+    # Track whether any lane uses a generator (for resolution matching)
+    has_generator = False
+    has_footage = False
+
+    lanes: list[Lane] = []
+    for lane_idx in range(actual_lanes):
+        # Per-lane step count (varies between lanes for texture)
+        lane_steps = n_steps or max(1, int(1 + complexity * 5 * rng.random()))
+
+        source = _random_source(rng, src, use_generators)
+
+        # Override source durations to hit target_dur
+        if seg_dur_target is not None:
+            lo = max(2.0, seg_dur_target * 0.7)
+            hi = seg_dur_target * 1.3
+            if isinstance(source, FootageSource):
+                source = FootageSource(
+                    path=source.path, method=source.method,
+                    min_dur=lo, max_dur=hi,
+                )
+            elif isinstance(source, GeneratorSource):
+                source = GeneratorSource(
+                    min_dur=lo, max_dur=hi,
+                    n_warps=source.n_warps,
+                    warp_categories=source.warp_categories,
+                )
+            elif isinstance(source, StaticSource):
+                source = StaticSource(min_dur=lo, max_dur=hi)
+            elif isinstance(source, SolidSource):
+                source = SolidSource(min_dur=lo, max_dur=hi, color=source.color)
+
+        if isinstance(source, GeneratorSource):
+            has_generator = True
+        if isinstance(source, FootageSource):
+            has_footage = True
+
+        steps = _random_steps(rng, lane_steps)
+        sequencing = "shuffle" if rng.random() < 0.6 else "concat"
+        transition = _random_transition(rng) if wants_transition else None
+
+        lanes.append(Lane(
+            source=source,
+            n_segments=actual_segments,
+            recipe=steps,
+            sequencing=sequencing,
+            transition=transition,
+        ))
+
+    # Compositing (only for multi-lane)
+    composite: Optional[CompositeSpec] = None
+    if len(lanes) > 1:
+        composite = _random_composite(rng)
+
+    # Post-processing
+    post: list[Step] = _random_post(rng) if wants_post else []
+
+    # Resolution: match source if mixing footage + generators
+    width, height = 1920, 1080
+    if has_footage and has_generator and src is not None:
+        # Will be resolved at runtime; set common defaults
+        # User can override by editing the recipe
+        width, height = 1280, 720
+
+    return BrainWipeRecipe(
+        lanes=lanes,
+        composite=composite,
+        post=post,
+        width=width,
+        height=height,
         seed=seed,
     )

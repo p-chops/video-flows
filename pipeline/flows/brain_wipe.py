@@ -643,10 +643,11 @@ def _materialize_generator_source(
     for i in range(n_segments):
         seg_rng = random.Random(rng.randint(0, 2 ** 31))
 
-        # Solid placeholder
+        # Solid placeholder — randomize duration per segment
+        seg_dur = rng.uniform(source.min_dur, source.max_dur)
         solid_path = work / f"solid_{i:03d}.mp4"
         solid_f = generate_solid.submit(
-            solid_path, source.duration,
+            solid_path, seg_dur,
             width=recipe.width, height=recipe.height,
             fps=recipe.fps, cfg=cfg,
         )
@@ -720,31 +721,37 @@ def _materialize_source(
                 return segments
 
         case GeneratorSource():
+            dur_label = (f"{source.min_dur:.0f}s" if source.min_dur == source.max_dur
+                         else f"{source.min_dur:.0f}–{source.max_dur:.0f}s")
             print(f"    generating {lane.n_segments} segments "
-                  f"({source.duration:.0f}s, {source.n_warps} warps)")
+                  f"({dur_label}, {source.n_warps} warps)")
             return _materialize_generator_source(
                 source, lane.n_segments, lane_idx, rng,
                 shader_cache, recipe, recipe_tag, cfg,
             )
 
-        case StaticSource(duration=dur):
+        case StaticSource(min_dur=lo, max_dur=hi):
             paths = []
             for i in range(lane.n_segments):
+                dur = rng.uniform(lo, hi)
                 p = work / f"static_{i:03d}.mp4"
                 generate_static(p, dur, width=recipe.width,
                                 height=recipe.height, fps=recipe.fps, cfg=cfg)
                 paths.append(p)
-            print(f"    {lane.n_segments} static segments ({dur:.0f}s)")
+            dur_label = f"{lo:.0f}s" if lo == hi else f"{lo:.0f}–{hi:.0f}s"
+            print(f"    {lane.n_segments} static segments ({dur_label})")
             return paths
 
-        case SolidSource(duration=dur, color=color):
+        case SolidSource(min_dur=lo, max_dur=hi, color=color):
             paths = []
             for i in range(lane.n_segments):
+                dur = rng.uniform(lo, hi)
                 p = work / f"solid_{i:03d}.mp4"
                 generate_solid(p, dur, color=color, width=recipe.width,
                                height=recipe.height, fps=recipe.fps, cfg=cfg)
                 paths.append(p)
-            print(f"    {lane.n_segments} solid segments ({dur:.0f}s)")
+            dur_label = f"{lo:.0f}s" if lo == hi else f"{lo:.0f}–{hi:.0f}s"
+            print(f"    {lane.n_segments} solid segments ({dur_label})")
             return paths
 
         case _:
@@ -925,12 +932,32 @@ def _composite_lanes(
     return out
 
 
+def _cleanup_work(work_dir: Path, recipe_tag: str) -> None:
+    """Remove all intermediate files for a recipe run."""
+    count = 0
+    freed = 0
+    prefix = f"bw_{recipe_tag}"
+    for p in sorted(work_dir.iterdir()):
+        if p.name.startswith(prefix):
+            if p.is_dir():
+                size = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+                shutil.rmtree(p)
+            else:
+                size = p.stat().st_size
+                p.unlink()
+            freed += size
+            count += 1
+    if count:
+        print(f"  cleanup: removed {count} work items ({freed / 1024 / 1024:.0f} MB)")
+
+
 @flow(name="brain-wipe", log_prints=True,
       task_runner=ConcurrentTaskRunner(max_workers=4))
 def brain_wipe(
     recipe: BrainWipeRecipe,
     output: Optional[Path] = None,
     cfg: Optional[Config] = None,
+    cleanup: bool = True,
 ) -> Path | list[Path]:
     """
     Recipe-driven meta-flow for the brain wipe pipeline.
@@ -1007,6 +1034,8 @@ def brain_wipe(
             shutil.copy2(current, out_path)
             final_lanes.append(out_path)
         print(f"\n{len(final_lanes)} channel outputs in {c.output_dir}")
+        if cleanup:
+            _cleanup_work(c.work_dir, recipe_tag)
         return final_lanes
 
     # ── Post-processing ───────────────────────────────────────────────────
@@ -1027,6 +1056,8 @@ def brain_wipe(
     final = output or c.output_dir / f"brain_wipe_{recipe_tag}.mp4"
     shutil.copy2(result, final)
     print(f"\nOutput: {final}")
+    if cleanup:
+        _cleanup_work(c.work_dir, recipe_tag)
     return final
 
 
