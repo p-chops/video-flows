@@ -67,7 +67,8 @@ class Config:
         Appends -pix_fmt and optional bitrate constraints.
         """
         if self.gpu_encode:
-            args = ["-c:v", "h264_videotoolbox", "-q:v", str(self.vt_quality)]
+            args = ["-c:v", "h264_videotoolbox", "-q:v", str(self.vt_quality),
+                    "-allow_sw", "1"]
         else:
             args = ["-c:v", self.default_codec, "-crf", str(self.default_crf)]
         args += ["-pix_fmt", self.default_pix_fmt]
