@@ -114,7 +114,44 @@ class PatchStep:
     patch_min: float = 0.05
     patch_max: float = 0.4
 
-Step = CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep | PingPongStep | EchoStep | PatchStep
+@dataclass
+class SlitScanStep:
+    """Slit-scan — each row/column samples a different point in time."""
+    axis: str = "horizontal"      # "horizontal" or "vertical"
+    scan_speed: float = 1.0       # temporal spread as fraction of total frames
+
+@dataclass
+class TemporalTileStep:
+    """Temporal tile — grid mosaic where each tile shows a different moment."""
+    grid: int = 4                 # tiles per axis (grid x grid)
+    offset_scale: float = 1.0    # max offset as fraction of total frames
+
+@dataclass
+class SmearStep:
+    """Smear — pixels only update when they change beyond a threshold."""
+    threshold: float = 0.1       # fraction of 255
+
+@dataclass
+class BloomStep:
+    """Bloom — frame differencing, static goes black, motion glows."""
+    sensitivity: float = 0.1     # lower = only strong motion
+
+@dataclass
+class StackStep:
+    """Stack — sliding window average/max/min of frames."""
+    window: int = 8              # number of frames
+    mode: str = "mean"           # "mean", "max", "min"
+
+@dataclass
+class SlipStep:
+    """Slip — offset bands of scanlines by different amounts in time."""
+    n_bands: int = 8
+    max_slip: float = 0.5        # fraction of total frames
+    axis: str = "horizontal"
+
+Step = (CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep
+        | PingPongStep | EchoStep | PatchStep | SlitScanStep | TemporalTileStep
+        | SmearStep | BloomStep | StackStep | SlipStep)
 
 
 # ─── Transitions ──────────────────────────────────────────────────────────────
@@ -218,6 +255,18 @@ def _step_label(step: Step) -> str:
             return f"echo ({mode}, trail={t:.2f})"
         case PatchStep(patch_min=mn, patch_max=mx):
             return f"patch ({mn:.0%}–{mx:.0%})"
+        case SlitScanStep(axis=a, scan_speed=sp):
+            return f"slit-scan ({a}, speed={sp:.2f})"
+        case TemporalTileStep(grid=g, offset_scale=os):
+            return f"temporal-tile ({g}×{g}, offset={os:.2f})"
+        case SmearStep(threshold=t):
+            return f"smear (threshold={t:.2f})"
+        case BloomStep(sensitivity=s):
+            return f"bloom (sensitivity={s:.2f})"
+        case StackStep(window=w, mode=m):
+            return f"stack ({m} ×{w})"
+        case SlipStep(n_bands=nb, max_slip=ms, axis=a):
+            return f"slip ({nb} bands, {a}, slip={ms:.2f})"
         case _:
             return type(step).__name__
 
@@ -316,6 +365,21 @@ def _recipe_to_hashable(recipe: BrainWipeRecipe) -> str:
             case PatchStep():
                 return {"type": "patch", "patch_min": s.patch_min,
                         "patch_max": s.patch_max}
+            case SlitScanStep():
+                return {"type": "slit_scan", "axis": s.axis,
+                        "scan_speed": s.scan_speed}
+            case TemporalTileStep():
+                return {"type": "temporal_tile", "grid": s.grid,
+                        "offset_scale": s.offset_scale}
+            case SmearStep():
+                return {"type": "smear", "threshold": s.threshold}
+            case BloomStep():
+                return {"type": "bloom", "sensitivity": s.sensitivity}
+            case StackStep():
+                return {"type": "stack", "window": s.window, "mode": s.mode}
+            case SlipStep():
+                return {"type": "slip", "n_bands": s.n_bands,
+                        "max_slip": s.max_slip, "axis": s.axis}
             case _:
                 return {"type": type(s).__name__}
 
@@ -389,6 +453,21 @@ def _step_to_dict(s: Step) -> dict:
         case PatchStep():
             return {"type": "patch", "patch_min": s.patch_min,
                     "patch_max": s.patch_max}
+        case SlitScanStep():
+            return {"type": "slit_scan", "axis": s.axis,
+                    "scan_speed": s.scan_speed}
+        case TemporalTileStep():
+            return {"type": "temporal_tile", "grid": s.grid,
+                    "offset_scale": s.offset_scale}
+        case SmearStep():
+            return {"type": "smear", "threshold": s.threshold}
+        case BloomStep():
+            return {"type": "bloom", "sensitivity": s.sensitivity}
+        case StackStep():
+            return {"type": "stack", "window": s.window, "mode": s.mode}
+        case SlipStep():
+            return {"type": "slip", "n_bands": s.n_bands,
+                    "max_slip": s.max_slip, "axis": s.axis}
         case _:
             raise ValueError(f"Unknown step type: {type(s).__name__}")
 
@@ -418,6 +497,22 @@ def _step_from_dict(d: dict) -> Step:
         return EchoStep(delay=d["delay"], trail=d["trail"])
     elif t == "patch":
         return PatchStep(patch_min=d["patch_min"], patch_max=d["patch_max"])
+    elif t == "slit_scan":
+        return SlitScanStep(axis=d.get("axis", "horizontal"),
+                            scan_speed=d.get("scan_speed", 1.0))
+    elif t == "temporal_tile":
+        return TemporalTileStep(grid=d.get("grid", 4),
+                                offset_scale=d.get("offset_scale", 1.0))
+    elif t == "smear":
+        return SmearStep(threshold=d.get("threshold", 0.1))
+    elif t == "bloom":
+        return BloomStep(sensitivity=d.get("sensitivity", 0.1))
+    elif t == "stack":
+        return StackStep(window=d.get("window", 8), mode=d.get("mode", "mean"))
+    elif t == "slip":
+        return SlipStep(n_bands=d.get("n_bands", 8),
+                        max_slip=d.get("max_slip", 0.5),
+                        axis=d.get("axis", "horizontal"))
     else:
         raise ValueError(f"Unknown step type: {t}")
 
@@ -1264,7 +1359,8 @@ _STEP_POOL: list[tuple[type, int]] = [
     (PatchStep, 2),
 ]
 
-_TIME_STEPS = (ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep)
+_TIME_STEPS = (ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
+               SlitScanStep, TemporalTileStep, SmearStep, BloomStep, StackStep, SlipStep)
 
 _TRANSITION_POOL: list[tuple[str, int]] = [
     ("crossfade", 4),
@@ -1596,7 +1692,10 @@ def _make_lane(
 
 def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
     """Generate a random time-effect step with randomized parameters."""
-    cls = rng.choice([ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep])
+    cls = rng.choice([
+        ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
+        SlitScanStep, TemporalTileStep, SmearStep, BloomStep, StackStep, SlipStep,
+    ])
     if cls is ScrubStep:
         return ScrubStep(
             smoothness=rng.uniform(1.0, 4.0),
@@ -1609,9 +1708,34 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
     elif cls is EchoStep:
         delay = 0.0 if rng.random() < 0.4 else rng.uniform(0.02, 0.3)
         return EchoStep(delay=delay, trail=rng.uniform(0.5 + complexity * 0.2, 0.9))
-    else:  # PatchStep
+    elif cls is PatchStep:
         mn = rng.uniform(0.03, 0.15)
         return PatchStep(patch_min=mn, patch_max=rng.uniform(mn + 0.1, 0.5))
+    elif cls is SlitScanStep:
+        return SlitScanStep(
+            axis=rng.choice(["horizontal", "vertical"]),
+            scan_speed=rng.uniform(0.3, 1.0 + complexity),
+        )
+    elif cls is TemporalTileStep:
+        return TemporalTileStep(
+            grid=rng.choice([3, 4, 5, 6]),
+            offset_scale=rng.uniform(0.3, 1.0),
+        )
+    elif cls is SmearStep:
+        return SmearStep(threshold=rng.uniform(0.05, 0.15 + complexity * 0.2))
+    elif cls is BloomStep:
+        return BloomStep(sensitivity=rng.uniform(0.05, 0.15 + complexity * 0.1))
+    elif cls is StackStep:
+        return StackStep(
+            window=rng.choice([4, 6, 8, 12, 16]),
+            mode=rng.choice(["mean", "mean", "max", "min"]),  # bias toward mean
+        )
+    else:  # SlipStep
+        return SlipStep(
+            n_bands=rng.choice([4, 6, 8, 12]),
+            max_slip=rng.uniform(0.2, 0.5 + complexity * 0.3),
+            axis=rng.choice(["horizontal", "vertical"]),
+        )
 
 
 def _shader_step(rng: _random_mod.Random, complexity: float, n: Optional[int] = None) -> ShaderStep:

@@ -1,6 +1,7 @@
 """
 Temporal manipulation tasks — time scrubbing, drift looping, ping-pong,
-echo trails, temporal patchwork.
+echo trails, temporal patchwork, slit-scan, temporal tile, smear, bloom,
+stack, slip.
 """
 
 from __future__ import annotations
@@ -485,5 +486,443 @@ def time_patch(
 
     elapsed = _time.monotonic() - t0
     print(f"  wrote {frame_count} frames in {elapsed:.1f}s → {dst.name}")
+
+    return dst
+
+
+@task(name="slit-scan")
+def slit_scan(
+    src: Path,
+    dst: Path,
+    *,
+    axis: str = "horizontal",
+    scan_speed: float = 1.0,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Slit-scan — each row (or column) of the output samples a different point
+    in time. Horizontal motion becomes vertical distortion and vice versa.
+
+    Output is the same duration as input.
+
+    axis:       "horizontal" = rows sample different times (default),
+                "vertical" = columns sample different times.
+    scan_speed: how many frames of offset between first and last row/col
+                as a fraction of total frames (default 1.0 = full span).
+    seed:       random seed (controls start offset).
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+    rng = np.random.default_rng(seed)
+
+    frames: list[np.ndarray] = []
+    for frame in read_frames(src, c):
+        frames.append(frame)
+    n = len(frames)
+
+    if n == 0:
+        raise ValueError(f"No frames read from {src}")
+
+    h, w = info.height, info.width
+    n_slices = h if axis == "horizontal" else w
+    # Max temporal spread across slices
+    spread = max(1, int(n * scan_speed))
+
+    start_offset = rng.integers(0, max(1, n))
+
+    print(f"slit_scan: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+    print(f"  axis={axis}, spread={spread}f, start_offset={start_offset}")
+    mem_mb = n * w * h * 3 / 1e6
+    print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
+
+    # Precompute per-slice offsets
+    slice_offsets = np.round(
+        np.linspace(0, spread, n_slices)
+    ).astype(int)
+
+    with FrameWriter(dst, info, cfg=c) as writer:
+        t0 = _time.monotonic()
+        last_log = t0
+        for out_idx in range(n):
+            out_frame = np.empty((h, w, 3), dtype=np.uint8)
+
+            for s in range(n_slices):
+                src_idx = (out_idx + start_offset + slice_offsets[s]) % n
+
+                if axis == "horizontal":
+                    out_frame[s, :, :] = frames[src_idx][s, :, :]
+                else:
+                    out_frame[:, s, :] = frames[src_idx][:, s, :]
+
+            writer.write(out_frame)
+
+            now = _time.monotonic()
+            if now - last_log >= 5.0:
+                pct = (out_idx + 1) / n * 100
+                elapsed = now - t0
+                logger.info("slit_scan: %.0f%% (%d/%d) elapsed=%.1fs",
+                            pct, out_idx + 1, n, elapsed)
+                last_log = now
+
+    elapsed = _time.monotonic() - t0
+    print(f"  wrote {n} frames in {elapsed:.1f}s → {dst.name}")
+
+    return dst
+
+
+@task(name="temporal-tile")
+def temporal_tile(
+    src: Path,
+    dst: Path,
+    *,
+    grid: int = 4,
+    offset_scale: float = 1.0,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Temporal tile — divide the frame into a grid, each tile shows content
+    from a different point in time. Temporal mosaic / surveillance wall.
+
+    Output is the same duration as input.
+
+    grid:          number of tiles per axis (grid x grid). Default 4.
+    offset_scale:  max time offset per tile as fraction of total frames
+                   (default 1.0 = tiles can span entire clip).
+    seed:          random seed (controls per-tile offsets).
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+    rng = np.random.default_rng(seed)
+
+    frames: list[np.ndarray] = []
+    for frame in read_frames(src, c):
+        frames.append(frame)
+    n = len(frames)
+
+    if n == 0:
+        raise ValueError(f"No frames read from {src}")
+
+    h, w = info.height, info.width
+    n_tiles = grid * grid
+    max_offset = max(1, int(n * offset_scale))
+
+    # Fixed random offset per tile for the whole clip
+    tile_offsets = rng.integers(0, max_offset, size=n_tiles)
+
+    print(f"temporal_tile: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+    print(f"  grid={grid}x{grid} ({n_tiles} tiles), max_offset={max_offset}f")
+    mem_mb = n * w * h * 3 / 1e6
+    print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
+
+    # Precompute tile boundaries
+    row_edges = np.linspace(0, h, grid + 1, dtype=int)
+    col_edges = np.linspace(0, w, grid + 1, dtype=int)
+
+    with FrameWriter(dst, info, cfg=c) as writer:
+        t0 = _time.monotonic()
+        last_log = t0
+        for out_idx in range(n):
+            out_frame = np.empty((h, w, 3), dtype=np.uint8)
+
+            for ti in range(n_tiles):
+                r, ci = divmod(ti, grid)
+                y0, y1 = row_edges[r], row_edges[r + 1]
+                x0, x1 = col_edges[ci], col_edges[ci + 1]
+
+                src_idx = (out_idx + tile_offsets[ti]) % n
+                out_frame[y0:y1, x0:x1, :] = frames[src_idx][y0:y1, x0:x1, :]
+
+            writer.write(out_frame)
+
+            now = _time.monotonic()
+            if now - last_log >= 5.0:
+                pct = (out_idx + 1) / n * 100
+                elapsed = now - t0
+                logger.info("temporal_tile: %.0f%% (%d/%d) elapsed=%.1fs",
+                            pct, out_idx + 1, n, elapsed)
+                last_log = now
+
+    elapsed = _time.monotonic() - t0
+    print(f"  wrote {n} frames in {elapsed:.1f}s → {dst.name}")
+
+    return dst
+
+
+@task(name="smear")
+def smear(
+    src: Path,
+    dst: Path,
+    *,
+    threshold: float = 0.1,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Smear — pixels only update when they change beyond a threshold.
+    Static areas freeze, motion areas refresh. Creates painterly erosion
+    where the image accumulates ghosts of stillness.
+
+    Single-pass streaming. One canvas buffer.
+
+    Output is the same duration as input.
+
+    threshold: change threshold as fraction of 255 (default 0.1).
+               0.05 = very sensitive (most pixels update).
+               0.2 = sticky (only strong motion breaks through).
+               0.5 = extreme (only drastic changes show).
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+
+    abs_threshold = threshold * 255.0
+
+    print(f"smear: {info.duration:.1f}s @ {info.fps}fps, {info.width}x{info.height}")
+    print(f"  threshold={threshold} (abs={abs_threshold:.1f})")
+
+    canvas: Optional[np.ndarray] = None
+    frame_count = 0
+
+    with FrameWriter(dst, info, cfg=c) as writer:
+        t0 = _time.monotonic()
+        last_log = t0
+        for frame in read_frames(src, c):
+            if canvas is None:
+                canvas = frame.copy()
+            else:
+                # Per-pixel max absolute difference across channels
+                diff = np.abs(
+                    frame.astype(np.int16) - canvas.astype(np.int16)
+                ).max(axis=2)
+                # Only update pixels that changed enough
+                mask = diff > abs_threshold
+                canvas[mask] = frame[mask]
+
+            writer.write(canvas)
+            frame_count += 1
+
+            now = _time.monotonic()
+            if now - last_log >= 5.0:
+                elapsed = now - t0
+                logger.info("smear: %d frames, elapsed=%.1fs",
+                            frame_count, elapsed)
+                last_log = now
+
+    elapsed = _time.monotonic() - t0
+    print(f"  wrote {frame_count} frames in {elapsed:.1f}s → {dst.name}")
+
+    return dst
+
+
+@task(name="bloom")
+def bloom(
+    src: Path,
+    dst: Path,
+    *,
+    sensitivity: float = 0.1,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Bloom — frame differencing: only show pixels that changed between
+    consecutive frames. Static areas go black, motion glows.
+    Temporal edge detection.
+
+    Single-pass streaming.
+
+    Output is the same duration as input.
+
+    sensitivity: difference scaling factor (default 0.1).
+                 Lower = only strong motion shows.
+                 Higher = amplifies subtle motion.
+                 The raw difference is multiplied by (1/sensitivity).
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+
+    gain = 1.0 / max(sensitivity, 0.01)
+
+    print(f"bloom: {info.duration:.1f}s @ {info.fps}fps, {info.width}x{info.height}")
+    print(f"  sensitivity={sensitivity}, gain={gain:.1f}x")
+
+    prev: Optional[np.ndarray] = None
+    frame_count = 0
+
+    with FrameWriter(dst, info, cfg=c) as writer:
+        t0 = _time.monotonic()
+        last_log = t0
+        for frame in read_frames(src, c):
+            if prev is None:
+                # First frame: output black
+                out = np.zeros_like(frame)
+            else:
+                diff = np.abs(
+                    frame.astype(np.float32) - prev.astype(np.float32)
+                )
+                out = np.clip(diff * gain, 0, 255).astype(np.uint8)
+
+            prev = frame.copy()
+            writer.write(out)
+            frame_count += 1
+
+            now = _time.monotonic()
+            if now - last_log >= 5.0:
+                elapsed = now - t0
+                logger.info("bloom: %d frames, elapsed=%.1fs",
+                            frame_count, elapsed)
+                last_log = now
+
+    elapsed = _time.monotonic() - t0
+    print(f"  wrote {frame_count} frames in {elapsed:.1f}s → {dst.name}")
+
+    return dst
+
+
+@task(name="frame-stack")
+def frame_stack(
+    src: Path,
+    dst: Path,
+    *,
+    window: int = 8,
+    mode: str = "mean",
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Stack — average (or max/min) a sliding window of frames together.
+    Long-exposure photography for video. Equal-weight window creates
+    a dreamy blur rather than exponential echo trails.
+
+    Streaming with a ring buffer of `window` frames.
+
+    Output is the same duration as input.
+
+    window: number of frames to accumulate (default 8).
+    mode:   "mean" (dreamy blur), "max" (brightest survives),
+            "min" (darkest survives). Default "mean".
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+
+    from collections import deque
+
+    print(f"frame_stack: {info.duration:.1f}s @ {info.fps}fps, "
+          f"{info.width}x{info.height}")
+    mem_mb = window * info.width * info.height * 3 / 1e6
+    print(f"  window={window} frames, mode={mode} ({mem_mb:.0f} MB buffer)")
+
+    ring: deque[np.ndarray] = deque(maxlen=window)
+    frame_count = 0
+
+    reduce_fn = {
+        "mean": lambda buf: np.mean(buf, axis=0).astype(np.uint8),
+        "max": lambda buf: np.max(buf, axis=0).astype(np.uint8),
+        "min": lambda buf: np.min(buf, axis=0).astype(np.uint8),
+    }[mode]
+
+    with FrameWriter(dst, info, cfg=c) as writer:
+        t0 = _time.monotonic()
+        last_log = t0
+        for frame in read_frames(src, c):
+            ring.append(frame.astype(np.float32) if mode == "mean" else frame)
+
+            buf = np.stack(list(ring), axis=0)
+            out = reduce_fn(buf)
+            writer.write(out)
+            frame_count += 1
+
+            now = _time.monotonic()
+            if now - last_log >= 5.0:
+                elapsed = now - t0
+                logger.info("frame_stack: %d frames, elapsed=%.1fs",
+                            frame_count, elapsed)
+                last_log = now
+
+    elapsed = _time.monotonic() - t0
+    print(f"  wrote {frame_count} frames in {elapsed:.1f}s → {dst.name}")
+
+    return dst
+
+
+@task(name="slip")
+def slip(
+    src: Path,
+    dst: Path,
+    *,
+    n_bands: int = 8,
+    max_slip: float = 0.5,
+    axis: str = "horizontal",
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Slip — offset bands of scanlines by different amounts in time.
+    Each horizontal (or vertical) band shows a slightly different moment,
+    like temporal interlacing artifacts.
+
+    All source frames loaded into memory.
+
+    Output is the same duration as input.
+
+    n_bands:   number of bands to split the frame into (default 8).
+    max_slip:  max time offset per band as fraction of total frames
+               (default 0.5).
+    axis:      "horizontal" = rows banded (default),
+               "vertical" = columns banded.
+    seed:      random seed (controls per-band offsets).
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+    rng = np.random.default_rng(seed)
+
+    frames: list[np.ndarray] = []
+    for frame in read_frames(src, c):
+        frames.append(frame)
+    n = len(frames)
+
+    if n == 0:
+        raise ValueError(f"No frames read from {src}")
+
+    h, w = info.height, info.width
+    max_offset = max(1, int(n * max_slip))
+
+    # Fixed random offset per band — symmetric around 0
+    band_offsets = rng.integers(-max_offset, max_offset + 1, size=n_bands)
+
+    dim = h if axis == "horizontal" else w
+    band_edges = np.linspace(0, dim, n_bands + 1, dtype=int)
+
+    print(f"slip: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+    print(f"  {n_bands} bands ({axis}), max_slip={max_slip} ({max_offset}f)")
+    print(f"  offsets: {list(band_offsets)}")
+    mem_mb = n * w * h * 3 / 1e6
+    print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
+
+    with FrameWriter(dst, info, cfg=c) as writer:
+        t0 = _time.monotonic()
+        last_log = t0
+        for out_idx in range(n):
+            out_frame = np.empty((h, w, 3), dtype=np.uint8)
+
+            for b in range(n_bands):
+                src_idx = (out_idx + band_offsets[b]) % n
+
+                if axis == "horizontal":
+                    y0, y1 = band_edges[b], band_edges[b + 1]
+                    out_frame[y0:y1, :, :] = frames[src_idx][y0:y1, :, :]
+                else:
+                    x0, x1 = band_edges[b], band_edges[b + 1]
+                    out_frame[:, x0:x1, :] = frames[src_idx][:, x0:x1, :]
+
+            writer.write(out_frame)
+
+            now = _time.monotonic()
+            if now - last_log >= 5.0:
+                pct = (out_idx + 1) / n * 100
+                elapsed = now - t0
+                logger.info("slip: %.0f%% (%d/%d) elapsed=%.1fs",
+                            pct, out_idx + 1, n, elapsed)
+                last_log = now
+
+    elapsed = _time.monotonic() - t0
+    print(f"  wrote {n} frames in {elapsed:.1f}s → {dst.name}")
 
     return dst

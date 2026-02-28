@@ -76,6 +76,12 @@ from ..recipe import (
     PingPongStep,
     EchoStep,
     PatchStep,
+    SlitScanStep,
+    TemporalTileStep,
+    SmearStep,
+    BloomStep,
+    StackStep,
+    SlipStep,
     BlendComposite,
     MaskedComposite,
     RandomComposite,
@@ -105,6 +111,12 @@ from ..tasks import (
     time_patch,
     time_scrub,
     transition_sequence,
+    slit_scan,
+    temporal_tile,
+    smear,
+    bloom,
+    frame_stack,
+    slip,
 )
 
 
@@ -600,6 +612,33 @@ def _submit_step(
         case PatchStep(patch_min=patch_min, patch_max=patch_max):
             return time_patch.submit(
                 src, dst, patch_min=patch_min, patch_max=patch_max,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case SlitScanStep(axis=axis, scan_speed=scan_speed):
+            return slit_scan.submit(
+                src, dst, axis=axis, scan_speed=scan_speed,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case TemporalTileStep(grid=grid, offset_scale=offset_scale):
+            return temporal_tile.submit(
+                src, dst, grid=grid, offset_scale=offset_scale,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case SmearStep(threshold=threshold):
+            return smear.submit(
+                src, dst, threshold=threshold, cfg=cfg,
+            )
+        case BloomStep(sensitivity=sensitivity):
+            return bloom.submit(
+                src, dst, sensitivity=sensitivity, cfg=cfg,
+            )
+        case StackStep(window=window, mode=mode):
+            return frame_stack.submit(
+                src, dst, window=window, mode=mode, cfg=cfg,
+            )
+        case SlipStep(n_bands=n_bands, max_slip=max_slip, axis=axis):
+            return slip.submit(
+                src, dst, n_bands=n_bands, max_slip=max_slip, axis=axis,
                 seed=rng.randint(0, 2 ** 31), cfg=cfg,
             )
         case _:
