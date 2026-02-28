@@ -24,15 +24,18 @@ pipeline/
 │   ├── shader.py          # Apply ISF shaders to video via moderngl
 │   ├── composite.py       # Blend, masked composite, multi-layer, PIP, chromakey
 │   ├── mask.py            # Luma, edge (Canny), motion, chroma, gradient masks
-│   ├── color.py           # normalize_levels — percentile-based level stretch
+│   ├── color.py           # normalize_levels, auto_levels — level stretch + gamma correction
 │   ├── glitch.py          # bitrate_crush — codec-based compression artifacts
-│   └── time.py            # Temporal effects: scrub, drift, ping-pong, echo, patch
+│   ├── time.py            # Temporal effects: scrub, drift, ping-pong, echo, patch
+│   └── transition.py      # Transitions: crossfade, luma_wipe, whip_pan, static_burst, flash
 └── flows/                 # Prefect @flow compositions (example pipelines)
     ├── examples.py        # 10 flows: cut-shuffle-shader, deep-color, shader-lab, crush-lab, etc.
     ├── stooges.py         # Multi-channel CRT TV content (crush sandwich + parallel)
     ├── brain_wipe.py      # Meta-flow + warp chains + long-form brain wipe renders
     ├── compositing_lab.py # Random layer compositing experiments
-    └── time_lab.py        # Time effect lab flows + CLI
+    ├── time_lab.py        # Time effect lab flows + CLI
+    ├── transition_lab.py  # Transition demos + CLI
+    └── show_reel.py       # Channel-surfing generator show reel with random transitions
 ```
 
 Tasks are atomic Prefect `@task` functions. Flows are `@flow` functions that compose tasks into pipelines. New workflows should follow the same pattern: write tasks for new primitives, compose them in flows.
@@ -102,6 +105,28 @@ Blend modes use ffmpeg filter names mapped via `FFMPEG_BLEND_MODES` dict. Adding
 
 **New recipe step type** (from labs): Add a dataclass to `recipe.py`, add it to the `Step` union type alias, add a `case` branch in `_submit_step()` in `brain_wipe.py`. The step dataclass should have fields matching the corresponding task's parameters.
 
+## Color Tasks
+
+`pipeline/tasks/color.py` provides two tasks:
+
+- **`normalize_levels`** — percentile-based level stretch via ffmpeg's `colorlevels` filter. Clips the darkest/brightest percentiles and stretches remaining range to 0–255. Static per-pixel LUT with negligible overhead.
+- **`auto_levels`** — probe average brightness via frame sampling, compute gamma correction toward a target (default 0.45), apply via ffmpeg `eq=gamma=X`. Skips encode if no correction needed. Useful for individual clips but not ideal for show reels (tends to flatten character).
+
+## Transition Tasks
+
+`pipeline/tasks/transition.py` provides transitions between video segments.
+
+**Transition types**: `crossfade`, `luma_wipe`, `whip_pan`, `static_burst`, `flash`, `random`
+
+**Key functions**:
+- **`transition_sequence`** — chain N clips with transitions. Public API used by recipes and flows.
+- **`_streaming_chain`** — O(n) streaming implementation for frame-level transitions (luma_wipe, whip_pan, static_burst, flash, random). Uses deque-based tail buffering — each clip read exactly once.
+- **`_xfade_chain`** — ffmpeg filter graph for crossfade (single ffmpeg command).
+
+**Random transitions** (`transition_type="random"`): picks a different transition type with random parameters for each pair boundary. Types drawn from: crossfade, luma_wipe, whip_pan, static_burst, flash. Deterministic per-pair seeds derived from base seed.
+
+**Wipe patterns** (for luma_wipe): horizontal, vertical, radial, diagonal, noise, star, directional.
+
 ## Glitch Tasks
 
 `pipeline/tasks/glitch.py` contains codec-abuse effects that exploit encoder behavior rather than processing frames directly.
@@ -140,6 +165,27 @@ A `BrainWipeRecipe` describes: **lanes** (parallel processing streams), **compos
 - `generator_stooges_recipe()` — stooges but all-generator, no source (alien TV station)
 - `gradient_dissolve_recipe(src)` — footage + generator via gradient mask (portal effect)
 - `accretion_recipe(src)` — 4 lanes at escalating destruction, screen-blended (geological layering)
+
+**Procedural recipe generator** (`random_recipe()`): picks a structural **archetype**, then fills in with complexity-scaled parameters.
+
+8 archetypes:
+| Archetype | Structure |
+|-----------|-----------|
+| `crush_sandwich` | Alternating crush/shader pairs (C-S-C-S), optional codec cascade |
+| `deep_time` | 3–5 stacked time effects + 1 shader (temporal destruction) |
+| `temporal_sandwich` | Alternating time/shader pairs (T-S-T-S) |
+| `escalation` | Progressive parameter increase (within-lane crush/downscale, or cross-lane intensity) |
+| `polyrhythm` | 2–4 lanes at harmonically-related temporal rates, brightness-neutral blend |
+| `palimpsest` | 2 lanes, same source, contrasting treatments (crush vs time), masked composite |
+| `hybrid` | Footage + generator lane, masked composite |
+| `grab_bag` | Original behavior — independent step draws from pool |
+
+Auto-selected from eligible set based on context (src, n_lanes, use_generators). Force via `archetype="deep_time"` etc. Complexity still scales all parameters within the chosen archetype.
+
+**Blend modes**: brightness-neutral only (overlay, softlight, difference, multiply, normal). Screen and add removed — they compound generator brightness problems.
+
+- **Performance impact**: complexity 0.2 renders at ~2–3x realtime; complexity 0.9 at ~11x realtime (for 3 min video)
+- **Overrides**: `n_lanes`, `n_steps`, `n_segments`, `use_transitions`, `use_generators`, `seed`, `target_dur`, `archetype`
 
 **Recipe utilities**: `print_recipe()` pretty-prints, `hash_recipe()` returns 8-char hex hash for output naming.
 
@@ -188,6 +234,19 @@ python -m pipeline.flows.stooges input/footage.mp4 \
     --n-channels 5 --segment-counts 8,10,12,14,16 --seed 42
 ```
 
+## Show Reel Flow
+
+`pipeline/flows/show_reel.py` — channel-surfing through heterogeneous generator "shows". Each show is a short (5–15s) generator clip rendered at a random complexity level via `random_recipe` + `brain_wipe` subflow, so some are raw warped generators and others have crush, shaders, time effects, etc. Shows are joined with random per-pair transitions.
+
+```
+PREFECT_API_URL=http://127.0.0.1:4200/api \
+python -m pipeline.flows.show_reel -n 15 --min-dur 10 --max-dur 15 --seed 777
+```
+
+Key parameters: `n_shows` (number of segments), `min_dur`/`max_dur` (duration range), `min_complexity`/`max_complexity` (complexity range per show), `transition_dur`, `width`/`height`, `seed`.
+
+Note: connect to persistent Prefect server via `PREFECT_API_URL=http://127.0.0.1:4200/api` for UI visibility. Without it, flows start ephemeral servers.
+
 ## Shader Library
 
 Shaders in `shaders/` directory, organized by function. Shaders use ISF v2 format with `CATEGORIES` tags in the JSON header for filtering.
@@ -230,6 +289,7 @@ Shaders declare categories in their ISF `CATEGORIES` header array. The `filter_s
 
 ## Known Issues / TODO
 
+- **Generator dynamic range** — dark generators (jellies, bioluminescent-field, abyssal_drift: avg Y 17–38) and bright generators (RD: avg Y 193–232) both produce flat output with poor dynamic range. Post-processing (normalize, auto_levels) doesn't work well — it flattens character. Needs shader-level fixes: lift dark floors, clamp bright peaks, reduce solid white blocks.
 - No audio passthrough — all tasks strip audio (`-an`). This is intentional for now (visual processing only) but could be added via ffmpeg's `-c:a copy` flag.
 - Work directory cleanup is not automatic. Intermediate files accumulate in `work/`.
 
