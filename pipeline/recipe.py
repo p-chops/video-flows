@@ -113,6 +113,24 @@ class PatchStep:
 Step = CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep | PingPongStep | EchoStep | PatchStep
 
 
+# ─── Transitions ──────────────────────────────────────────────────────────────
+
+@dataclass
+class TransitionSpec:
+    """Transition applied between segments during sequencing."""
+    type: str = "crossfade"       # crossfade | luma_wipe | whip_pan | static_burst | flash
+    duration: float = 1.0
+    # luma_wipe
+    pattern: str = "horizontal"
+    softness: float = 0.1
+    angle: float = 0.0
+    # whip_pan
+    direction: str = "left"
+    blur_strength: float = 0.5
+    # flash
+    decay: float = 3.0
+
+
 # ─── Lanes ────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -123,6 +141,7 @@ class Lane:
     recipe: list[Step] = field(default_factory=list)
     sequencing: str = "shuffle"    # "shuffle" | "concat"
     static_gap: float = 0.0       # >0 = interleave static between segments (sec)
+    transition: Optional[TransitionSpec] = None  # transition between segments
 
 
 # ─── Compositing specs ────────────────────────────────────────────────────────
@@ -230,6 +249,16 @@ def print_recipe(recipe: BrainWipeRecipe) -> None:
         if lane.static_gap > 0:
             print(f" (static gap {lane.static_gap:.1f}s)", end="")
         print()
+        if lane.transition:
+            t = lane.transition
+            detail = f"{t.type} ({t.duration:.1f}s)"
+            if t.type == "luma_wipe":
+                detail += f" pattern={t.pattern} softness={t.softness:.1f}"
+            elif t.type == "whip_pan":
+                detail += f" dir={t.direction}"
+            elif t.type == "flash":
+                detail += f" decay={t.decay:.1f}"
+            print(f"    transition: {detail}")
         if lane.recipe:
             print(f"    recipe:")
             for j, step in enumerate(lane.recipe):
@@ -304,6 +333,11 @@ def _recipe_to_hashable(recipe: BrainWipeRecipe) -> str:
                 "recipe": [_step_dict(s) for s in l.recipe],
                 "sequencing": l.sequencing,
                 "static_gap": l.static_gap,
+                "transition": {
+                    "type": l.transition.type, "dur": l.transition.duration,
+                    "pattern": l.transition.pattern,
+                    "direction": l.transition.direction,
+                } if l.transition else None,
             }
             for l in recipe.lanes
         ],
@@ -891,5 +925,95 @@ def accretion_recipe(
         ],
         composite=composite,
         post=[NormalizeStep()],
+        seed=seed,
+    )
+
+
+def transition_reel_recipe(
+    src: Path,
+    *,
+    n_segments: int = 8,
+    n_shaders: int = 2,
+    transition_dur: float = 1.0,
+    sequencing: str = "shuffle",
+    seed: Optional[int] = None,
+) -> BrainWipeRecipe:
+    """Montage: footage segments → shaders → crossfade transitions.
+
+    Clean, flowing reel — segments are individually processed with shaders
+    then sequenced with smooth crossfades between each pair.
+    """
+    return BrainWipeRecipe(
+        lanes=[Lane(
+            source=FootageSource(src),
+            n_segments=n_segments,
+            recipe=[ShaderStep(n_shaders=n_shaders)],
+            sequencing=sequencing,
+            transition=TransitionSpec(type="crossfade", duration=transition_dur),
+        )],
+        seed=seed,
+    )
+
+
+def channel_surf_recipe(
+    src: Path,
+    *,
+    n_segments: int = 8,
+    crush: float = 0.95,
+    n_shaders: int = 2,
+    seed: Optional[int] = None,
+) -> BrainWipeRecipe:
+    """Glitchy TV: crush sandwich → static burst transitions.
+
+    Each segment gets a crush sandwich (crush → shaders → crush → normalize)
+    then segments are stitched together with short bursts of TV static.
+    Channel-surfing aesthetic.
+    """
+    return BrainWipeRecipe(
+        lanes=[Lane(
+            source=FootageSource(src),
+            n_segments=n_segments,
+            recipe=[
+                CrushStep(crush=crush),
+                ShaderStep(n_shaders=n_shaders),
+                CrushStep(crush=crush * 0.95),
+                NormalizeStep(),
+            ],
+            sequencing="shuffle",
+            transition=TransitionSpec(type="static_burst", duration=0.3),
+        )],
+        seed=seed,
+    )
+
+
+def dissolve_dream_recipe(
+    src: Path,
+    *,
+    n_segments: int = 8,
+    n_shaders: int = 2,
+    transition_dur: float = 2.0,
+    seed: Optional[int] = None,
+) -> BrainWipeRecipe:
+    """Structural/dreamy: time effects + shaders → soft radial luma wipe.
+
+    Segments are drifted, shader-processed, then echo-trailed. Soft radial
+    luma wipes dissolve between each pair — slow, hypnotic transitions
+    that feel like drifting between states.
+    """
+    return BrainWipeRecipe(
+        lanes=[Lane(
+            source=FootageSource(src),
+            n_segments=n_segments,
+            recipe=[
+                DriftStep(loop_dur=0.5),
+                ShaderStep(n_shaders=n_shaders),
+                EchoStep(delay=0.0, trail=0.7),
+            ],
+            sequencing="concat",
+            transition=TransitionSpec(
+                type="luma_wipe", duration=transition_dur,
+                pattern="radial", softness=0.3,
+            ),
+        )],
         seed=seed,
     )

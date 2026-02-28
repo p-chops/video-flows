@@ -104,6 +104,7 @@ from ..tasks import (
     shuffle_clips,
     time_patch,
     time_scrub,
+    transition_sequence,
 )
 
 
@@ -806,8 +807,8 @@ def _sequence_lane(
     """Sequence processed segments into a single output per lane."""
     out = cfg.work_dir / f"bw_{recipe_tag}_lane_{lane_idx:02d}_seq.mp4"
 
-    # Interleave static if requested
-    if lane.static_gap > 0:
+    # Interleave static if requested (only without transitions)
+    if lane.static_gap > 0 and not lane.transition:
         # Match static resolution to actual segment resolution (not recipe defaults)
         seg_info = probe(processed[0], cfg)
         static_path = cfg.work_dir / f"bw_{recipe_tag}_lane_{lane_idx:02d}_static.mp4"
@@ -823,7 +824,25 @@ def _sequence_lane(
                 pieces.append(static_path)
         processed = pieces
 
-    if lane.sequencing == "shuffle":
+    if lane.transition:
+        # Shuffle order if requested (before applying transitions)
+        if lane.sequencing == "shuffle":
+            seq_rng = random.Random(rng.randint(0, 2 ** 31))
+            seq_rng.shuffle(processed)
+        t = lane.transition
+        kwargs: dict = {}
+        if t.type == "luma_wipe":
+            kwargs = dict(pattern=t.pattern, softness=t.softness, angle=t.angle)
+        elif t.type == "whip_pan":
+            kwargs = dict(direction=t.direction, blur_strength=t.blur_strength)
+        elif t.type == "flash":
+            kwargs = dict(decay=t.decay)
+        transition_sequence(
+            processed, out, transition_type=t.type,
+            duration=t.duration, seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            **kwargs,
+        )
+    elif lane.sequencing == "shuffle":
         shuffle_clips(processed, out, seed=rng.randint(0, 2 ** 31), cfg=cfg)
     else:
         concat_clips(processed, out, cfg=cfg)
