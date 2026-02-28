@@ -17,9 +17,9 @@ from .color import normalize_levels
 from .glitch import bitrate_crush
 from .time import (
     time_scrub, drift_loop, ping_pong, echo_trail, time_patch,
-    slit_scan, temporal_tile, smear, bloom, frame_stack, slip,
+    slit_scan, temporal_tile, smear, bloom, frame_stack, slip, flow_warp,
 )
 from .transition import (
     crossfade, luma_wipe, whip_pan, static_burst, flash, transition_sequence,
 )
-from .transform import mirror, zoom, invert
+from .transform import mirror, zoom, invert, hue_shift, saturate

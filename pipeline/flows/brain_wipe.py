@@ -85,6 +85,9 @@ from ..recipe import (
     MirrorStep,
     ZoomStep,
     InvertStep,
+    HueShiftStep,
+    SaturateStep,
+    FlowWarpStep,
     BlendComposite,
     MaskedComposite,
     RandomComposite,
@@ -123,6 +126,9 @@ from ..tasks import (
     mirror,
     zoom,
     invert,
+    hue_shift,
+    saturate,
+    flow_warp,
 )
 
 
@@ -655,6 +661,15 @@ def _submit_step(
             )
         case InvertStep():
             return invert.submit(src, dst, cfg=cfg)
+        case HueShiftStep(degrees=degrees):
+            return hue_shift.submit(src, dst, degrees=degrees, cfg=cfg)
+        case SaturateStep(amount=amount):
+            return saturate.submit(src, dst, amount=amount, cfg=cfg)
+        case FlowWarpStep(amplify=amplify, smooth=smooth):
+            return flow_warp.submit(
+                src, dst, amplify=amplify, smooth=smooth,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
         case _:
             raise ValueError(f"Unknown step type: {type(step).__name__}")
 

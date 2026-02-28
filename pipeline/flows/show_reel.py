@@ -225,6 +225,30 @@ def show_reel_render(
               f"(seed={show['seed']}, {show['kind']}, "
               f"complexity={show['complexity']:.2f}, {show['duration']:.1f}s)...")
         result = brain_wipe(recipe, output=show_path, cfg=c, cleanup=True)
+
+        # Brightness floor — stretch dark shows so the reel stays watchable.
+        # ffmpeg normalize filter: actual min→0, actual max→255.
+        # independence=0 links channels (preserves hue), smoothing=10
+        # avoids per-frame flicker.
+        from ..tasks.color import _probe_brightness
+        avg = _probe_brightness(result, c)
+        if avg < 0.15:
+            import subprocess
+            lifted = work / f"show_{idx:03d}_lifted.mp4"
+            subprocess.run([
+                c.ffmpeg_bin, "-y", "-loglevel", c.ffmpeg_loglevel,
+                "-i", str(result),
+                "-vf", "normalize=independence=0:smoothing=10:strength=0.8",
+                "-an",
+                "-c:v", c.default_codec, "-crf", str(c.default_crf),
+                "-pix_fmt", c.default_pix_fmt,
+                str(lifted),
+            ], check=True)
+            result.unlink()
+            lifted.rename(result)
+            result = show_path
+            print(f"    brightness floor: avg={avg:.2f} → normalized")
+
         show_clips.append(result)
 
     print(f"\n  all {len(shows)} shows rendered")

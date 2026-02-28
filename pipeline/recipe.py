@@ -166,10 +166,27 @@ class InvertStep:
     """Invert video colours (negative)."""
     pass
 
+@dataclass
+class HueShiftStep:
+    """Rotate hue by a fixed angle."""
+    degrees: float = 90.0        # 0–360
+
+@dataclass
+class SaturateStep:
+    """Adjust saturation."""
+    amount: float = 2.0          # 0 = grayscale, 1 = unchanged, 2+ = oversaturated
+
+@dataclass
+class FlowWarpStep:
+    """Optical-flow motion exaggeration — amplify existing motion."""
+    amplify: float = 3.0         # 1.0 = natural, 3.0 = 3x exaggerated
+    smooth: int = 15             # flow field smoothing kernel (odd)
+
 Step = (CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep
         | PingPongStep | EchoStep | PatchStep | SlitScanStep | TemporalTileStep
         | SmearStep | BloomStep | StackStep | SlipStep
-        | MirrorStep | ZoomStep | InvertStep)
+        | MirrorStep | ZoomStep | InvertStep | HueShiftStep | SaturateStep
+        | FlowWarpStep)
 
 
 # ─── Transitions ──────────────────────────────────────────────────────────────
@@ -291,6 +308,12 @@ def _step_label(step: Step) -> str:
             return f"zoom ({f:.1f}x @ {cx:.2f},{cy:.2f})"
         case InvertStep():
             return "invert"
+        case HueShiftStep(degrees=d):
+            return f"hue-shift ({d:.0f}°)"
+        case SaturateStep(amount=a):
+            return f"saturate ({a:.1f}x)"
+        case FlowWarpStep(amplify=a, smooth=s):
+            return f"flow-warp ({a:.1f}x, smooth={s})"
         case _:
             return type(step).__name__
 
@@ -499,6 +522,12 @@ def _step_to_dict(s: Step) -> dict:
                     "center_x": s.center_x, "center_y": s.center_y}
         case InvertStep():
             return {"type": "invert"}
+        case HueShiftStep():
+            return {"type": "hue_shift", "degrees": s.degrees}
+        case SaturateStep():
+            return {"type": "saturate", "amount": s.amount}
+        case FlowWarpStep():
+            return {"type": "flow_warp", "amplify": s.amplify, "smooth": s.smooth}
         case _:
             raise ValueError(f"Unknown step type: {type(s).__name__}")
 
@@ -552,6 +581,13 @@ def _step_from_dict(d: dict) -> Step:
                         center_y=d.get("center_y", 0.5))
     elif t == "invert":
         return InvertStep()
+    elif t == "hue_shift":
+        return HueShiftStep(degrees=d.get("degrees", 90.0))
+    elif t == "saturate":
+        return SaturateStep(amount=d.get("amount", 2.0))
+    elif t == "flow_warp":
+        return FlowWarpStep(amplify=d.get("amplify", 3.0),
+                            smooth=d.get("smooth", 15))
     else:
         raise ValueError(f"Unknown step type: {t}")
 
@@ -1391,24 +1427,30 @@ def dissolve_dream_recipe(
 _STEP_POOL: list[tuple[type, int]] = [
     (ShaderStep, 5),
     (CrushStep, 3),
-    (ScrubStep, 2),
-    (DriftStep, 2),
-    (PingPongStep, 2),
-    (EchoStep, 2),
-    (PatchStep, 2),
-    (SlitScanStep, 1),
-    (TemporalTileStep, 1),
-    (SmearStep, 1),
-    (BloomStep, 1),
-    (StackStep, 1),
-    (SlipStep, 1),
+    # Time effects — bias toward motion-amplifying over motion-replacing
+    (FlowWarpStep, 3),   # motion exaggeration — the headline act
+    (EchoStep, 2),        # motion blur / trails
+    (DriftStep, 2),       # temporal drift
+    (SmearStep, 2),       # directional motion smear
+    (SlipStep, 1),        # band-offset temporal slip
+    (BloomStep, 1),       # motion-triggered bloom
+    (SlitScanStep, 1),    # slit scan
+    (TemporalTileStep, 1),# temporal mosaic
+    (StackStep, 1),       # frame averaging
+    (PatchStep, 1),       # random temporal patches
+    (ScrubStep, 1),       # reduced — causes "stuttering"
+    (PingPongStep, 1),    # reduced — causes "breathing"
+    # Spatial / color transforms
     (MirrorStep, 2),
     (ZoomStep, 2),
     (InvertStep, 1),
+    (HueShiftStep, 2),
+    (SaturateStep, 2),
 ]
 
 _TIME_STEPS = (ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
-               SlitScanStep, TemporalTileStep, SmearStep, BloomStep, StackStep, SlipStep)
+               SlitScanStep, TemporalTileStep, SmearStep, BloomStep, StackStep, SlipStep,
+               FlowWarpStep)
 
 _TRANSITION_POOL: list[tuple[str, int]] = [
     ("crossfade", 4),
@@ -1514,8 +1556,17 @@ def _random_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
             center_x=rng.uniform(0.2, 0.8),
             center_y=rng.uniform(0.2, 0.8),
         )
-    else:  # InvertStep
+    elif cls is InvertStep:
         return InvertStep()
+    elif cls is HueShiftStep:
+        return HueShiftStep(degrees=rng.uniform(30.0, 330.0))
+    elif cls is SaturateStep:
+        return SaturateStep(amount=rng.uniform(1.5, 3.0))
+    else:  # FlowWarpStep
+        return FlowWarpStep(
+            amplify=rng.uniform(2.0, 5.0 + complexity * 3.0),
+            smooth=rng.choice([9, 15, 21]),
+        )
 
 
 def _random_steps(rng: _random_mod.Random, n_steps: int, complexity: float = 0.5) -> list[Step]:
@@ -1568,9 +1619,11 @@ def _ensure_motion(rng: _random_mod.Random, steps: list[Step],
         return steps
 
     effect = rng.choice([
+        FlowWarpStep(amplify=rng.uniform(1.5, 5.0), smooth=rng.choice([9, 15, 21])),
         EchoStep(delay=0.0, trail=rng.uniform(0.7, 0.95)),
         DriftStep(loop_dur=rng.uniform(0.5, 1.5), drift=None),
-        PingPongStep(window=rng.uniform(0.3, 0.8)),
+        SmearStep(threshold=rng.uniform(0.05, 0.2)),
+        SlipStep(n_bands=rng.choice([4, 6, 8]), max_slip=rng.uniform(0.2, 0.5)),
     ])
     steps = list(steps)
     steps.insert(max(0, len(steps) - 1), effect)
@@ -1778,6 +1831,7 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
     cls = rng.choice([
         ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
         SlitScanStep, TemporalTileStep, SmearStep, BloomStep, StackStep, SlipStep,
+        FlowWarpStep,
     ])
     if cls is ScrubStep:
         return ScrubStep(
@@ -1813,11 +1867,16 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
             window=rng.choice([4, 6, 8, 12, 16]),
             mode=rng.choice(["mean", "mean", "max", "min"]),  # bias toward mean
         )
-    else:  # SlipStep
+    elif cls is SlipStep:
         return SlipStep(
             n_bands=rng.choice([4, 6, 8, 12]),
             max_slip=rng.uniform(0.2, 0.5 + complexity * 0.3),
             axis=rng.choice(["horizontal", "vertical"]),
+        )
+    else:  # FlowWarpStep
+        return FlowWarpStep(
+            amplify=rng.uniform(1.5, 3.0 + complexity * 4.0),
+            smooth=rng.choice([9, 15, 21, 31]),
         )
 
 
@@ -2508,7 +2567,7 @@ def _eligible_edge_poster(src, n_lanes, use_generators):
     return True
 
 _ARCHETYPES: dict[str, tuple] = {
-    "crush_sandwich":    (_build_crush_sandwich, _eligible_crush_sandwich),
+    # "crush_sandwich":    (_build_crush_sandwich, _eligible_crush_sandwich),
     "deep_time":         (_build_deep_time, _eligible_deep_time),
     "temporal_sandwich": (_build_temporal_sandwich, _eligible_temporal_sandwich),
     "escalation":        (_build_escalation, _eligible_escalation),

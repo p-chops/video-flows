@@ -1,5 +1,5 @@
 """
-Spatial transform tasks — mirror, zoom, invert.
+Spatial and colour transform tasks — mirror, zoom, invert, hue_shift, saturate.
 
 Pure ffmpeg filter-graph operations — fast, no frame-level Python.
 """
@@ -100,6 +100,62 @@ def invert(
         c.ffmpeg_bin, "-y", "-loglevel", c.ffmpeg_loglevel,
         "-i", str(src),
         "-vf", "negate",
+        "-an",
+        "-c:v", c.default_codec, "-crf", str(c.default_crf),
+        "-pix_fmt", c.default_pix_fmt,
+        str(dst),
+    ], check=True)
+
+    return dst
+
+
+@task(name="hue-shift")
+def hue_shift(
+    src: Path,
+    dst: Path,
+    *,
+    degrees: float = 90.0,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Rotate hue by a fixed angle in degrees.
+
+    degrees: hue rotation (0–360). 90 = warm→cool, 180 = complementary.
+    """
+    c = cfg or Config()
+
+    subprocess.run([
+        c.ffmpeg_bin, "-y", "-loglevel", c.ffmpeg_loglevel,
+        "-i", str(src),
+        "-vf", f"hue=h={degrees}",
+        "-an",
+        "-c:v", c.default_codec, "-crf", str(c.default_crf),
+        "-pix_fmt", c.default_pix_fmt,
+        str(dst),
+    ], check=True)
+
+    return dst
+
+
+@task(name="saturate")
+def saturate(
+    src: Path,
+    dst: Path,
+    *,
+    amount: float = 2.0,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Adjust saturation.
+
+    amount: multiplier (0.0 = grayscale, 1.0 = unchanged, 2.0+ = oversaturated).
+    """
+    c = cfg or Config()
+
+    subprocess.run([
+        c.ffmpeg_bin, "-y", "-loglevel", c.ffmpeg_loglevel,
+        "-i", str(src),
+        "-vf", f"hue=s={amount}",
         "-an",
         "-c:v", c.default_codec, "-crf", str(c.default_crf),
         "-pix_fmt", c.default_pix_fmt,

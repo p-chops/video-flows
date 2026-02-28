@@ -926,3 +926,104 @@ def slip(
     print(f"  wrote {n} frames in {elapsed:.1f}s → {dst.name}")
 
     return dst
+
+
+@task(name="flow-warp")
+def flow_warp(
+    src: Path,
+    dst: Path,
+    *,
+    amplify: float = 3.0,
+    smooth: int = 15,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Optical-flow motion exaggeration — amplify existing motion in video.
+
+    Computes dense optical flow between consecutive frames, then warps
+    each frame by amplified flow vectors. Things that are already moving
+    move MORE. Static areas stay still.
+
+    Single-pass streaming. One previous-frame buffer.
+
+    Output is the same duration as input.
+
+    amplify: flow multiplier (1.0 = natural, 3.0 = 3x exaggerated,
+             negative = reverse motion). Default 3.0.
+    smooth:  Gaussian blur kernel size for flow field smoothing.
+             Higher = smoother warps, fewer artifacts. Default 15.
+             Must be odd.
+    """
+    import cv2
+
+    c = cfg or Config()
+    info = probe(src, c)
+
+    # Ensure smooth kernel is odd
+    smooth = max(3, smooth | 1)
+
+    print(f"flow_warp: {info.duration:.1f}s @ {info.fps}fps, {info.width}x{info.height}")
+    print(f"  amplify={amplify}, smooth={smooth}")
+
+    prev_gray: Optional[np.ndarray] = None
+    frame_count = 0
+
+    # Build remap base grids (pixel coordinates)
+    h, w = info.height, info.width
+    grid_x, grid_y = np.meshgrid(np.arange(w, dtype=np.float32),
+                                  np.arange(h, dtype=np.float32))
+
+    with FrameWriter(dst, info, cfg=c) as writer:
+        t0 = _time.monotonic()
+        last_log = t0
+        for frame in read_frames(src, c):
+            gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+
+            if prev_gray is None:
+                # First frame — emit unchanged
+                writer.write(frame)
+            else:
+                # Dense optical flow (Farneback)
+                flow = cv2.calcOpticalFlowFarneback(
+                    prev_gray, gray,
+                    None,
+                    pyr_scale=0.5,
+                    levels=3,
+                    winsize=15,
+                    iterations=3,
+                    poly_n=5,
+                    poly_sigma=1.2,
+                    flags=0,
+                )
+
+                # Smooth the flow field to reduce noise
+                flow[:, :, 0] = cv2.GaussianBlur(flow[:, :, 0], (smooth, smooth), 0)
+                flow[:, :, 1] = cv2.GaussianBlur(flow[:, :, 1], (smooth, smooth), 0)
+
+                # Amplify and build remap coordinates
+                map_x = grid_x + flow[:, :, 0] * amplify
+                map_y = grid_y + flow[:, :, 1] * amplify
+
+                # Warp the current frame
+                warped = cv2.remap(
+                    frame, map_x, map_y,
+                    interpolation=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_REFLECT,
+                )
+                writer.write(warped)
+
+            prev_gray = gray
+            frame_count += 1
+
+            now = _time.monotonic()
+            if now - last_log >= 5.0:
+                elapsed = now - t0
+                logger.info("flow_warp: %d frames, elapsed=%.1fs",
+                            frame_count, elapsed)
+                last_log = now
+
+    elapsed = _time.monotonic() - t0
+    print(f"  wrote {frame_count} frames in {elapsed:.1f}s → {dst.name}")
+
+    return dst

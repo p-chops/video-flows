@@ -39,10 +39,12 @@ def normalize_levels(
     """
     c = cfg or Config()
 
-    # colorlevels rimax/rimin etc. specify the fraction of the histogram
-    # to clip from each end. We apply the same clipping to all channels.
+    # colorlevels rimin/rimax are input intensity levels [0.0–1.0].
+    # rimin = black point (values below become black)
+    # rimax = white point (values above become white)
+    # Everything between is stretched to fill 0–255.
     bp = black_point
-    wp = 1.0 - white_point  # convert percentile to clip fraction
+    wp = white_point
     vf = (
         f"colorlevels="
         f"rimin={bp}:gimin={bp}:bimin={bp}:"
