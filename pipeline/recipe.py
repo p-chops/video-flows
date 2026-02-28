@@ -122,7 +122,7 @@ Step = CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep | PingPong
 @dataclass
 class TransitionSpec:
     """Transition applied between segments during sequencing."""
-    type: str = "crossfade"       # crossfade | luma_wipe | whip_pan | static_burst | flash
+    type: str = "crossfade"       # crossfade | luma_wipe | whip_pan | static_burst | flash | random
     duration: float = 1.0
     # luma_wipe
     pattern: str = "horizontal"
@@ -1301,11 +1301,21 @@ def _weighted_choice(rng: _random_mod.Random, pool: list[tuple[Any, int]]) -> An
     return items[-1]
 
 
-def _random_step(rng: _random_mod.Random) -> Step:
+def _random_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
     """Generate a single random step with randomized parameters."""
-    cls = _weighted_choice(rng, _STEP_POOL)
+    # At low complexity, suppress time effects (the expensive ones)
+    pool = list(_STEP_POOL)
+    if complexity < 0.5:
+        # Scale down time effect weights: at complexity=0 they're near-zero
+        time_scale = max(0.1, complexity * 2)  # 0→0.1, 0.5→1.0
+        pool = [
+            (cls, max(1, int(w * time_scale)) if cls in _TIME_STEPS else w)
+            for cls, w in pool
+        ]
+    cls = _weighted_choice(rng, pool)
     if cls is ShaderStep:
-        return ShaderStep(n_shaders=rng.randint(1, 4))
+        max_shaders = max(1, int(1 + complexity * 3))  # 0→1, 0.5→2, 1.0→4
+        return ShaderStep(n_shaders=rng.randint(1, max_shaders))
     elif cls is CrushStep:
         return CrushStep(
             crush=rng.uniform(0.5, 1.0),
@@ -1329,9 +1339,9 @@ def _random_step(rng: _random_mod.Random) -> Step:
         return PatchStep(patch_min=mn, patch_max=rng.uniform(mn + 0.1, 0.5))
 
 
-def _random_steps(rng: _random_mod.Random, n_steps: int) -> list[Step]:
+def _random_steps(rng: _random_mod.Random, n_steps: int, complexity: float = 0.5) -> list[Step]:
     """Generate a random processing recipe with constraints."""
-    steps = [_random_step(rng) for _ in range(n_steps)]
+    steps = [_random_step(rng, complexity) for _ in range(n_steps)]
 
     # Constraint: at most 2 crush steps
     crush_count = 0
@@ -1352,15 +1362,17 @@ def _random_steps(rng: _random_mod.Random, n_steps: int) -> list[Step]:
         if isinstance(s, _TIME_STEPS):
             time_count += 1
             if time_count > 2:
-                filtered.append(ShaderStep(n_shaders=rng.randint(1, 3)))
+                max_sh = max(1, int(1 + complexity * 3))
+                filtered.append(ShaderStep(n_shaders=rng.randint(1, max_sh)))
                 continue
         filtered.append(s)
     steps = filtered
 
     # Guarantee at least 1 shader step
     if not any(isinstance(s, ShaderStep) for s in steps):
+        max_sh = max(1, int(1 + complexity * 3))
         pos = rng.randint(0, max(0, len(steps) - 1))
-        steps.insert(pos, ShaderStep(n_shaders=rng.randint(1, 3)))
+        steps.insert(pos, ShaderStep(n_shaders=rng.randint(1, max_sh)))
 
     # Maybe append normalize (60% chance)
     if rng.random() < 0.6 and not any(isinstance(s, NormalizeStep) for s in steps):
@@ -1373,8 +1385,10 @@ def _random_source(
     rng: _random_mod.Random,
     src: Optional[Path],
     use_generators: Optional[bool],
+    complexity: float = 0.5,
 ) -> SourceSpec:
     """Pick a random source type."""
+    max_warps = max(1, int(1 + complexity * 3))  # 0→1, 0.5→2, 1.0→4
     if src is not None and use_generators is not True:
         roll = rng.random()
         if roll < 0.70 or use_generators is False:
@@ -1385,7 +1399,7 @@ def _random_source(
             lo = rng.uniform(8, 15)
             return GeneratorSource(
                 min_dur=lo, max_dur=lo + rng.uniform(5, 20),
-                n_warps=rng.randint(0, 3),
+                n_warps=rng.randint(0, max_warps),
             )
         else:
             lo = rng.uniform(4, 8)
@@ -1396,7 +1410,7 @@ def _random_source(
             lo = rng.uniform(8, 15)
             return GeneratorSource(
                 min_dur=lo, max_dur=lo + rng.uniform(5, 20),
-                n_warps=rng.randint(1, 4),
+                n_warps=rng.randint(1, max_warps),
             )
         else:
             lo = rng.uniform(4, 8)
@@ -1525,7 +1539,7 @@ def random_recipe(
         # Per-lane step count (varies between lanes for texture)
         lane_steps = n_steps or max(1, int(1 + complexity * 5 * rng.random()))
 
-        source = _random_source(rng, src, use_generators)
+        source = _random_source(rng, src, use_generators, complexity)
 
         # Override source durations to hit target_dur
         if seg_dur_target is not None:
@@ -1552,7 +1566,7 @@ def random_recipe(
         if isinstance(source, FootageSource):
             has_footage = True
 
-        steps = _random_steps(rng, lane_steps)
+        steps = _random_steps(rng, lane_steps, complexity)
         sequencing = "shuffle" if rng.random() < 0.6 else "concat"
         transition = _random_transition(rng) if wants_transition else None
 

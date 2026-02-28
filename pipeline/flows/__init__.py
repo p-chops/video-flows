@@ -21,3 +21,4 @@ from .transition_lab import (
     transition_lab_whip_pan, transition_lab_static_burst,
     transition_lab_flash, transition_lab_sequence,
 )
+from .show_reel import show_reel

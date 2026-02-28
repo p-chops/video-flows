@@ -12,6 +12,8 @@ import numpy as np
 from prefect import task
 
 from ..config import Config
+import subprocess
+
 from ..ffmpeg import probe, concat_files, FrameWriter, VideoInfo
 
 
@@ -86,15 +88,19 @@ def generate_solid(dst: Path, duration: float,
     """
     Generate a solid-colour clip (default black).
     Useful as a background layer for compositing.
+    Uses ffmpeg's color source filter — sub-second for any duration.
     """
     c = cfg or Config()
-    total_frames = int(duration * fps)
-    info = VideoInfo(width=width, height=height, fps=fps, duration=duration, codec=c.default_codec)
-    frame = np.full((height, width, 3), color, dtype=np.uint8)
-
-    with FrameWriter(dst, info, cfg=c) as writer:
-        for _ in range(total_frames):
-            writer.write(frame)
+    hex_color = f"0x{color[0]:02x}{color[1]:02x}{color[2]:02x}"
+    subprocess.run([
+        c.ffmpeg_bin, "-y", "-loglevel", c.ffmpeg_loglevel,
+        "-f", "lavfi", "-i",
+        f"color=c={hex_color}:s={width}x{height}:r={fps}:d={duration}",
+        "-an",
+        "-c:v", "libx264", "-preset", "ultrafast", "-qp", "51",
+        "-pix_fmt", c.default_pix_fmt,
+        str(dst),
+    ], check=True)
     return dst
 
 

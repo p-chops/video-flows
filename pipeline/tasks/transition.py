@@ -517,6 +517,206 @@ def flash(
     return dst
 
 
+# ── Blender factories ─────────────────────────────────────────────────────────
+#
+# Each factory captures transition parameters and returns a callable:
+#     blend(tail_buf, head_buf, n, h, w) -> generator of uint8 frames
+# where tail_buf/head_buf are lists of uint8 frames, n = overlap frame count.
+
+
+def _make_luma_wipe_blender(
+    pattern: str, softness: float, angle: float, seed: Optional[int],
+):
+    """Factory for luma wipe overlap blending."""
+    noise_field = None
+    if pattern == "noise" and seed is not None:
+        # Deferred: noise_field generated on first call (needs h, w)
+        pass
+
+    def blend(tail, head, n, h, w):
+        nf = None
+        if pattern == "noise":
+            rng = np.random.default_rng(seed)
+            nf = rng.random((h, w), dtype=np.float32)
+        for i in range(n):
+            t = (i + 1) / (n + 1)
+            fa = tail[i].astype(np.float32)
+            fb = head[i].astype(np.float32)
+            mask = _generate_wipe_mask(h, w, pattern, t, softness, nf,
+                                       angle=angle)
+            mask_3ch = mask[:, :, np.newaxis]
+            blended = fa * (1.0 - mask_3ch) + fb * mask_3ch
+            yield np.clip(blended, 0, 255).astype(np.uint8)
+
+    return blend
+
+
+def _make_whip_pan_blender(direction: str, blur_strength: float):
+    """Factory for whip pan overlap blending."""
+    horizontal = direction in ("left", "right")
+
+    def blend(tail, head, n, h, w):
+        dim = w if horizontal else h
+        max_blur = int(dim * blur_strength * 0.3)
+        max_blur = max(max_blur, 3) | 1
+        half = n // 2
+
+        for i in range(n):
+            if i < half:
+                slide_t = i / max(half - 1, 1)
+                frame = tail[i]
+            else:
+                slide_t = 1.0 - ((i - half) / max(n - half - 1, 1))
+                frame = head[i]
+
+            ease = slide_t ** 2
+            max_offset = w if horizontal else h
+            offset = int(ease * max_offset)
+
+            if horizontal:
+                shift = -offset if direction == "left" else offset
+                shifted = np.roll(frame, shift, axis=1)
+                if shift < 0:
+                    shifted[:, shift:] = 0
+                elif shift > 0:
+                    shifted[:, :shift] = 0
+            else:
+                shift = -offset if direction == "up" else offset
+                shifted = np.roll(frame, shift, axis=0)
+                if shift < 0:
+                    shifted[shift:, :] = 0
+                elif shift > 0:
+                    shifted[:shift, :] = 0
+
+            blur_k = int(ease * max_blur)
+            blur_k = max(blur_k, 1) | 1
+            if blur_k >= 3:
+                if horizontal:
+                    kernel = np.zeros((1, blur_k), dtype=np.float32)
+                    kernel[0, :] = 1.0 / blur_k
+                else:
+                    kernel = np.zeros((blur_k, 1), dtype=np.float32)
+                    kernel[:, 0] = 1.0 / blur_k
+                shifted = cv2.filter2D(shifted, -1, kernel)
+
+            yield shifted
+
+    return blend
+
+
+def _make_static_burst_blender(seed: Optional[int]):
+    """Factory for static burst overlap blending."""
+    def blend(tail, head, n, h, w):
+        rng = np.random.default_rng(seed)
+        ramp_in = n // 4
+        ramp_out = n // 4
+
+        for i in range(n):
+            static = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
+
+            if i < ramp_in:
+                t = (i + 1) / (ramp_in + 1)
+                fa = tail[i].astype(np.float32)
+                blended = fa * (1.0 - t) + static.astype(np.float32) * t
+                yield np.clip(blended, 0, 255).astype(np.uint8)
+            elif i >= n - ramp_out:
+                t = (i - (n - ramp_out) + 1) / (ramp_out + 1)
+                fb = head[i].astype(np.float32)
+                blended = static.astype(np.float32) * (1.0 - t) + fb * t
+                yield np.clip(blended, 0, 255).astype(np.uint8)
+            else:
+                yield static
+
+    return blend
+
+
+def _make_flash_blender(decay: float):
+    """Factory for white flash overlap blending."""
+    def blend(tail, head, n, h, w):
+        white = np.full((h, w, 3), 255, dtype=np.float32)
+        peak = 0.25
+
+        for i in range(n):
+            t = (i + 1) / (n + 1)
+            fa = tail[i].astype(np.float32)
+            fb = head[i].astype(np.float32)
+
+            if t <= peak:
+                ramp = (t / peak) ** 2
+                blended = fa * (1.0 - ramp) + white * ramp
+            else:
+                fade_t = (t - peak) / (1.0 - peak)
+                white_amount = (1.0 - fade_t) ** decay
+                blended = fb * (1.0 - white_amount) + white * white_amount
+
+            yield np.clip(blended, 0, 255).astype(np.uint8)
+
+    return blend
+
+
+def _make_blender(transition_type: str, seed: Optional[int], **kwargs):
+    """Dispatch to the appropriate blender factory."""
+    if transition_type == "luma_wipe":
+        return _make_luma_wipe_blender(
+            pattern=kwargs.get("pattern", "horizontal"),
+            softness=kwargs.get("softness", 0.1),
+            angle=kwargs.get("angle", 0.0),
+            seed=seed,
+        )
+    elif transition_type == "whip_pan":
+        return _make_whip_pan_blender(
+            direction=kwargs.get("direction", "left"),
+            blur_strength=kwargs.get("blur_strength", 0.5),
+        )
+    elif transition_type == "static_burst":
+        return _make_static_burst_blender(seed=seed)
+    elif transition_type == "flash":
+        return _make_flash_blender(decay=kwargs.get("decay", 3.0))
+    else:
+        raise ValueError(f"Unknown transition type for streaming: {transition_type}")
+
+
+_RANDOM_TRANSITION_TYPES = ["crossfade", "luma_wipe", "whip_pan", "static_burst", "flash"]
+_WIPE_PATTERNS = [
+    "horizontal", "vertical", "radial", "diagonal",
+    "directional", "noise", "star",
+]
+_WHIP_DIRS = ["left", "right", "up", "down"]
+
+
+def _make_random_blender(seed: int):
+    """Pick a random transition type and params, return a blender."""
+    rng = np.random.default_rng(seed)
+    t_type = rng.choice(_RANDOM_TRANSITION_TYPES)
+
+    if t_type == "crossfade":
+        # Crossfade as a blender — simple linear interpolation
+        def blend(tail, head, n, h, w):
+            for i in range(n):
+                t = (i + 1) / (n + 1)
+                blended = np.clip(
+                    (1.0 - t) * tail[i].astype(np.float32)
+                    + t * head[i].astype(np.float32),
+                    0, 255,
+                ).astype(np.uint8)
+                yield blended
+        return blend
+    elif t_type == "luma_wipe":
+        pattern = str(rng.choice(_WIPE_PATTERNS))
+        softness = float(rng.uniform(0.05, 0.4))
+        angle = float(rng.uniform(0, 360)) if rng.random() < 0.3 else 0.0
+        return _make_luma_wipe_blender(pattern, softness, angle, seed)
+    elif t_type == "whip_pan":
+        direction = str(rng.choice(_WHIP_DIRS))
+        blur_strength = float(rng.uniform(0.3, 0.8))
+        return _make_whip_pan_blender(direction, blur_strength)
+    elif t_type == "static_burst":
+        return _make_static_burst_blender(seed)
+    else:  # flash
+        decay = float(rng.uniform(2.0, 5.0))
+        return _make_flash_blender(decay)
+
+
 # ── Multi-clip chaining ──────────────────────────────────────────────────────
 
 def _xfade_chain(
@@ -561,49 +761,127 @@ def _xfade_chain(
     return dst
 
 
-def _iterative_chain(
+def _streaming_chain(
     clips: list[Path], dst: Path, transition_type: str,
     duration: float, seed: Optional[int], cfg: Config, log,
     **kwargs,
 ) -> Path:
-    """Chain clips by applying transitions pair-by-pair."""
-    current = clips[0]
-    work_dir = dst.parent
+    """
+    Chain N clips with frame-level transitions in a single streaming pass.
 
-    for i in range(1, len(clips)):
-        is_last = (i == len(clips) - 1)
-        pair_dst = dst if is_last else work_dir / f"{dst.stem}_pair_{i:03d}.mp4"
+    Instead of pair-by-pair iteration (O(n²) re-encoding), this reads each
+    clip exactly once and writes to a single FrameWriter. Only the overlap
+    region (~overlap_frames) is buffered at any given time.
 
-        if transition_type == "luma_wipe":
-            luma_wipe.fn(
-                current, clips[i], pair_dst, duration=duration,
-                pattern=kwargs.get("pattern", "horizontal"),
-                softness=kwargs.get("softness", 0.1),
-                seed=seed, cfg=cfg,
-            )
-        elif transition_type == "whip_pan":
-            whip_pan.fn(
-                current, clips[i], pair_dst, duration=duration,
-                direction=kwargs.get("direction", "left"),
-                blur_strength=kwargs.get("blur_strength", 0.5),
-                cfg=cfg,
-            )
-        elif transition_type == "static_burst":
-            static_burst.fn(
-                current, clips[i], pair_dst, duration=duration,
-                seed=seed, cfg=cfg,
-            )
-        elif transition_type == "flash":
-            flash.fn(
-                current, clips[i], pair_dst, duration=duration,
-                decay=kwargs.get("decay", 3.0),
-                cfg=cfg,
-            )
-        else:
-            raise ValueError(f"Unknown transition type: {transition_type}")
+    Frame flow:
+        Clip 0:  [stream to writer][tail buffer]
+                                     ↓ blend ↓
+        Clip 1:                     [head buf][stream][tail buffer]
+                                                       ↓ blend ↓
+        Clip 2:                                       [head buf][stream]
+    """
+    from collections import deque
 
-        current = pair_dst
+    # Probe first clip for output info and compute overlap
+    info_0 = probe(clips[0], cfg)
+    h, w = info_0.height, info_0.width
+    overlap_frames = int(round(duration * info_0.fps))
 
+    # Derive per-pair seeds deterministically from base seed
+    rng_seeds = np.random.default_rng(seed)
+    pair_seeds = [int(rng_seeds.integers(0, 2**31)) for _ in range(len(clips) - 1)]
+
+    total_written = 0
+    t0 = time.monotonic()
+    last_log = t0
+
+    log.info("streaming-chain: %d clips, %s transitions (%.2fs each) → %s  (%dx%d)",
+             len(clips), transition_type, duration, dst.name, w, h)
+
+    with FrameWriter(dst, info_0, cfg=cfg) as writer:
+        tail_buffer: list[np.ndarray] = []
+
+        for clip_idx, clip_path in enumerate(clips):
+            gen = read_frames(clip_path, cfg=cfg)
+            is_last_clip = (clip_idx == len(clips) - 1)
+
+            if clip_idx == 0:
+                # First clip: stream everything except the tail
+                window = deque(maxlen=overlap_frames)
+                for frame in gen:
+                    if len(window) == overlap_frames:
+                        writer.write(window[0])
+                        total_written += 1
+                    window.append(frame)
+                tail_buffer = list(window)
+
+            else:
+                # Subsequent clips: blend head with previous tail, then stream
+
+                # Collect head frames for blending
+                head_buffer: list[np.ndarray] = []
+                for frame in gen:
+                    if len(head_buffer) < overlap_frames:
+                        head_buffer.append(frame)
+                    else:
+                        break
+                # 'frame' is now the first non-overlap frame (or gen is exhausted)
+
+                # Blend overlap region
+                pair_seed = pair_seeds[clip_idx - 1]
+                if transition_type == "random":
+                    blender = _make_random_blender(pair_seed)
+                else:
+                    blender = _make_blender(transition_type, pair_seed, **kwargs)
+                n_blend = min(len(tail_buffer), len(head_buffer))
+                for blended_frame in blender(tail_buffer[:n_blend],
+                                             head_buffer[:n_blend],
+                                             n_blend, h, w):
+                    writer.write(blended_frame)
+                    total_written += 1
+
+                # Write any leftover head frames beyond the blend region
+                for hf in head_buffer[n_blend:]:
+                    writer.write(hf)
+                    total_written += 1
+
+                if is_last_clip:
+                    # Last clip: stream remaining frames directly
+                    # (we already consumed one frame breaking out of the
+                    #  head-collection loop — write it if gen wasn't exhausted)
+                    try:
+                        writer.write(frame)
+                        total_written += 1
+                    except UnboundLocalError:
+                        pass  # gen exhausted during head collection
+                    for f in gen:
+                        writer.write(f)
+                        total_written += 1
+                else:
+                    # Interior clip: stream body, buffer tail for next transition
+                    window = deque(maxlen=overlap_frames)
+                    # The 'frame' we broke out with goes into the window
+                    try:
+                        window.append(frame)
+                    except UnboundLocalError:
+                        pass
+                    for f in gen:
+                        if len(window) == overlap_frames:
+                            writer.write(window[0])
+                            total_written += 1
+                        window.append(f)
+                    tail_buffer = list(window)
+
+            now = time.monotonic()
+            if now - last_log >= 5.0:
+                elapsed = now - t0
+                log.info("streaming-chain: clip %d/%d done, %d frames written  "
+                         "elapsed=%.1fs", clip_idx + 1, len(clips),
+                         total_written, elapsed)
+                last_log = now
+
+    elapsed = time.monotonic() - t0
+    log.info("streaming-chain: done in %.1fs (%d frames)", elapsed, total_written)
     return dst
 
 
@@ -620,12 +898,14 @@ def transition_sequence(
     Join multiple clips with transitions between each adjacent pair.
 
     For crossfade: chained ffmpeg xfade filters (single invocation).
-    For luma_wipe / whip_pan: pair-by-pair iteration.
+    For luma_wipe / whip_pan / static_burst / flash: streaming chain
+    (single FrameWriter, each clip read exactly once).
 
-    transition_type: "crossfade", "luma_wipe", "whip_pan"
+    transition_type: "crossfade", "luma_wipe", "whip_pan", "static_burst",
+                     "flash", "random" (picks a different type per pair)
     duration:        transition length in seconds
     **kwargs:        passed to underlying transition (pattern, softness,
-                     direction, blur_strength)
+                     direction, blur_strength, decay)
     """
     c = cfg or Config()
     log = get_run_logger()
@@ -639,5 +919,5 @@ def transition_sequence(
     if transition_type == "crossfade":
         return _xfade_chain(clips, dst, duration, c, log)
     else:
-        return _iterative_chain(clips, dst, transition_type, duration,
+        return _streaming_chain(clips, dst, transition_type, duration,
                                 seed, c, log, **kwargs)

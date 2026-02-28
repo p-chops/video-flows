@@ -4,6 +4,8 @@ Color correction tasks — normalization, levels, etc.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -11,7 +13,7 @@ import numpy as np
 from prefect import task
 
 from ..config import Config
-from ..ffmpeg import FrameWriter, probe, read_frames
+from ..ffmpeg import probe, read_frames
 
 
 @task(name="normalize-levels")
@@ -24,63 +26,104 @@ def normalize_levels(
     cfg: Optional[Config] = None,
 ) -> Path:
     """
-    Normalize video levels — stretches luminance so the darkest pixels
-    hit black and the brightest hit white.
+    Normalize video levels — clips the darkest and brightest percentiles
+    and stretches the remaining range to fill 0–255.
 
-    Two-pass: first pass finds the percentile-based black/white points
-    across a sample of frames, second pass applies the correction.
+    Uses ffmpeg's colorlevels filter: a static per-pixel LUT operation
+    with negligible overhead beyond decode + encode.
 
-    black_point / white_point: percentiles (0–1) for clipping.
-    Using 0.01/0.99 avoids outlier pixels blowing out the range.
+    black_point: fraction of darkest values to clip to black (default 0.01).
+    white_point: fraction of brightest values to clip to white (default 0.01).
+                 Note: this is the fraction clipped from the TOP, not a
+                 percentile — so 0.01 means clip the top 1%.
     """
     c = cfg or Config()
-    info = probe(src, c)
 
-    # --- Pass 1: sample frames to find luminance range ---
-    luma_mins = []
-    luma_maxs = []
-    frame_count = 0
-    # Sample every Nth frame to keep pass 1 fast
-    sample_interval = max(1, int(info.fps))  # ~1 sample per second
+    # colorlevels rimax/rimin etc. specify the fraction of the histogram
+    # to clip from each end. We apply the same clipping to all channels.
+    bp = black_point
+    wp = 1.0 - white_point  # convert percentile to clip fraction
+    vf = (
+        f"colorlevels="
+        f"rimin={bp}:gimin={bp}:bimin={bp}:"
+        f"rimax={wp}:gimax={wp}:bimax={wp}"
+    )
 
-    for frame in read_frames(src, c):
-        frame_count += 1
-        if frame_count % sample_interval != 0:
-            continue
-        # Compute luminance
-        luma = (
-            frame[:, :, 0].astype(np.float32) * 0.299
-            + frame[:, :, 1].astype(np.float32) * 0.587
-            + frame[:, :, 2].astype(np.float32) * 0.114
-        )
-        luma_mins.append(np.percentile(luma, black_point * 100))
-        luma_maxs.append(np.percentile(luma, white_point * 100))
+    subprocess.run([
+        c.ffmpeg_bin, "-y", "-loglevel", c.ffmpeg_loglevel,
+        "-i", str(src),
+        "-vf", vf,
+        "-an",
+        "-c:v", c.default_codec, "-crf", str(c.default_crf),
+        "-pix_fmt", c.default_pix_fmt,
+        str(dst),
+    ], check=True)
 
-    if not luma_mins:
-        # Fallback: no frames sampled, just copy
-        import shutil
+    return dst
+
+
+def _probe_brightness(src: Path, cfg: Config, n_samples: int = 10) -> float:
+    """Sample frames and return average brightness in [0, 1]."""
+    info = probe(src, cfg)
+    total_frames = int(info.duration * info.fps)
+    sample_interval = max(1, total_frames // n_samples)
+
+    total = 0.0
+    count = 0
+    for i, frame in enumerate(read_frames(src, cfg=cfg)):
+        if i % sample_interval == 0:
+            total += float(np.mean(frame)) / 255.0
+            count += 1
+    return total / max(count, 1)
+
+
+@task(name="auto-levels")
+def auto_levels(
+    src: Path,
+    dst: Path,
+    *,
+    target: float = 0.45,
+    max_gamma: float = 3.0,
+    threshold: float = 0.05,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Probe average brightness and apply gamma correction toward a target.
+
+    Measures the clip's average luma, computes a gamma that would push it
+    toward `target` (0–1 scale), and applies via ffmpeg's eq filter.
+    Skips the encode if no correction is needed (avg already near target).
+
+    target:    desired average brightness in [0, 1] (default 0.45)
+    max_gamma: clamp gamma to [1/max_gamma, max_gamma] (default 3.0)
+    threshold: skip correction if |gamma - 1| < threshold (default 0.05)
+    """
+    c = cfg or Config()
+
+    avg = _probe_brightness(src, c)
+
+    # Compute gamma: eq filter applies out = in^(1/gamma)
+    # We want avg^(1/gamma) = target, so gamma = log(avg) / log(target)
+    if avg < 0.005:
+        gamma = max_gamma
+    elif avg > 0.995:
+        gamma = 1.0 / max_gamma
+    else:
+        gamma = np.log(avg) / np.log(target)
+        gamma = float(np.clip(gamma, 1.0 / max_gamma, max_gamma))
+
+    if abs(gamma - 1.0) < threshold:
         shutil.copy2(src, dst)
         return dst
 
-    # Use median of sampled percentiles for stability
-    lo = np.median(luma_mins)
-    hi = np.median(luma_maxs)
-
-    # Avoid division by zero / no-op if range is already full
-    if hi - lo < 5.0:
-        import shutil
-        shutil.copy2(src, dst)
-        return dst
-
-    scale = 255.0 / (hi - lo)
-    print(f"  normalize: lo={lo:.1f} hi={hi:.1f} scale={scale:.2f}x")
-
-    # --- Pass 2: apply correction ---
-    with FrameWriter(dst, info, cfg=c) as writer:
-        for frame in read_frames(src, c):
-            f = frame.astype(np.float32)
-            f = (f - lo) * scale
-            np.clip(f, 0, 255, out=f)
-            writer.write(f.astype(np.uint8))
+    subprocess.run([
+        c.ffmpeg_bin, "-y", "-loglevel", c.ffmpeg_loglevel,
+        "-i", str(src),
+        "-vf", f"eq=gamma={gamma:.3f}",
+        "-an",
+        "-c:v", c.default_codec, "-crf", str(c.default_crf),
+        "-pix_fmt", c.default_pix_fmt,
+        str(dst),
+    ], check=True)
 
     return dst
