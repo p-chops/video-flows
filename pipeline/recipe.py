@@ -2351,6 +2351,79 @@ def _eligible_warp_focus(src, n_lanes, use_generators):
     # Generator-only — always eligible (ignores src)
     return n_lanes is None or n_lanes == 1
 
+
+def _build_edge_poster(
+    rng: _random_mod.Random,
+    complexity: float,
+    src: Optional[Path],
+    *,
+    n_lanes: Optional[int],
+    n_steps: Optional[int],
+    n_segments: Optional[int],
+    use_transitions: Optional[bool],
+    use_generators: Optional[bool],
+    target_dur: Optional[float],
+    seed: Optional[int],
+) -> BrainWipeRecipe:
+    """Posterize → edge_glow pairing. Posterization generates bold edges that
+    move in interesting ways when time effects are applied."""
+    actual_segments = _resolve_segments(rng, complexity, n_segments)
+    wants_transition = use_transitions if use_transitions is not None else (
+        rng.random() < 0.2 + 0.6 * complexity
+    )
+    seg_target = _seg_dur_target(target_dur, actual_segments, wants_transition)
+
+    posterize = ShaderStep(shader_paths=[Path("shaders/posterize.fs")])
+    edge_glow = ShaderStep(shader_paths=[Path("shaders/edge_glow.fs")])
+
+    source = _random_source(rng, src, use_generators, complexity)
+
+    two_lane = (n_lanes is not None and n_lanes >= 2) or (
+        n_lanes is None and complexity > 0.6
+    )
+
+    if two_lane:
+        # Lane A: posterize → edge_glow → time effect (the edge-motion lane)
+        a_steps: list[Step] = [posterize, edge_glow, _random_time_step(rng, complexity)]
+
+        # Lane B: posterize → color shader (bold color blocks)
+        b_steps: list[Step] = [posterize, _shader_step(rng, complexity, n=1)]
+        if complexity > 0.5:
+            b_steps.append(_random_time_step(rng, complexity))
+
+        a_steps = _ensure_motion(rng, a_steps, source)
+
+        lane_a = _make_lane(rng, source=source, steps=a_steps,
+                            n_segments=actual_segments,
+                            wants_transition=wants_transition, seg_target=seg_target)
+        lane_b = _make_lane(rng, source=source, steps=b_steps,
+                            n_segments=actual_segments,
+                            wants_transition=wants_transition, seg_target=seg_target)
+
+        recipe = _assemble_recipe([lane_a, lane_b], rng=rng, complexity=complexity,
+                                  src=src, seed=seed, wants_post=False)
+        recipe.composite = MaskedComposite(
+            mask_type=rng.choice(["edge", "luma", "motion"]),
+        )
+        return recipe
+
+    # Single lane: posterize → edge_glow → optional color shader
+    # No time effects — let the natural edge motion be the star
+    steps: list[Step] = [posterize, edge_glow]
+    if rng.random() < 0.3 + complexity * 0.3:
+        steps.append(_shader_step(rng, complexity, n=1))
+
+    lane = _make_lane(rng, source=source, steps=steps,
+                      n_segments=actual_segments,
+                      wants_transition=wants_transition, seg_target=seg_target)
+
+    return _assemble_recipe([lane], rng=rng, complexity=complexity, src=src,
+                            seed=seed, wants_post=rng.random() < 0.2)
+
+
+def _eligible_edge_poster(src, n_lanes, use_generators):
+    return True
+
 _ARCHETYPES: dict[str, tuple] = {
     "crush_sandwich":    (_build_crush_sandwich, _eligible_crush_sandwich),
     "deep_time":         (_build_deep_time, _eligible_deep_time),
@@ -2363,6 +2436,7 @@ _ARCHETYPES: dict[str, tuple] = {
     "stutter":           (_build_stutter, _eligible_stutter),
     "echo_chamber":      (_build_echo_chamber, _eligible_echo_chamber),
     "warp_focus":        (_build_warp_focus, _eligible_warp_focus),
+    "edge_poster":       (_build_edge_poster, _eligible_edge_poster),
 }
 
 
