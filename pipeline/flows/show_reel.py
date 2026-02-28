@@ -48,6 +48,20 @@ def _resolve_src(rng: random.Random, src: Optional[Path]) -> Optional[Path]:
     return src
 
 
+def _resolve_n_shows(n_shows: Optional[int], reel_dur: Optional[float],
+                     min_dur: float, max_dur: float) -> int:
+    """Resolve n_shows from explicit value or reel_dur target.
+
+    Priority: explicit n_shows > computed from reel_dur > default 20.
+    """
+    if n_shows is not None:
+        return n_shows
+    if reel_dur is not None:
+        avg_dur = (min_dur + max_dur) / 2
+        return max(1, round(reel_dur / avg_dur))
+    return 20
+
+
 # ── Plan phase ───────────────────────────────────────────────────────────────
 
 def _plan_shows(
@@ -385,8 +399,10 @@ def show_reel_batch(
 
 def _add_plan_args(parser):
     """Add the shared show-reel arguments to a parser."""
-    parser.add_argument("-n", "--n-shows", type=int, default=20,
-                        help="Number of shows")
+    parser.add_argument("-n", "--n-shows", type=int, default=None,
+                        help="Number of shows (auto-calculated from --reel-dur if omitted)")
+    parser.add_argument("--reel-dur", type=float, default=None,
+                        help="Target reel duration in seconds (auto-calculates n_shows)")
     parser.add_argument("--min-dur", type=float, default=5.0,
                         help="Minimum show duration (seconds)")
     parser.add_argument("--max-dur", type=float, default=10.0,
@@ -450,8 +466,10 @@ def main():
     if args.command == "plan":
         cfg = Config()
         cfg.ensure_dirs()
+        n_shows = _resolve_n_shows(args.n_shows, args.reel_dur,
+                                   args.min_dur, args.max_dur)
         manifest = _plan_shows(
-            n_shows=args.n_shows,
+            n_shows=n_shows,
             min_dur=args.min_dur,
             max_dur=args.max_dur,
             min_complexity=args.min_complexity,
@@ -479,8 +497,10 @@ def main():
 
     elif args.command == "run":
         out = Path(args.output) if args.output else None
+        n_shows = _resolve_n_shows(args.n_shows, args.reel_dur,
+                                   args.min_dur, args.max_dur)
         show_reel(
-            n_shows=args.n_shows,
+            n_shows=n_shows,
             min_dur=args.min_dur,
             max_dur=args.max_dur,
             min_complexity=args.min_complexity,
@@ -496,9 +516,11 @@ def main():
         )
 
     elif args.command == "batch":
+        n_shows = _resolve_n_shows(args.n_shows, args.reel_dur,
+                                   args.min_dur, args.max_dur)
         show_reel_batch(
             n_reels=args.n_reels,
-            n_shows=args.n_shows,
+            n_shows=n_shows,
             min_dur=args.min_dur,
             max_dur=args.max_dur,
             min_complexity=args.min_complexity,

@@ -53,6 +53,7 @@ from __future__ import annotations
 import hashlib
 import random
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -582,6 +583,93 @@ def _resolve_shaders_for_step(
     return pick_shader_stack(pool, step.n_shaders, rng, pin_defaults=LEVEL_PARAMS)
 
 
+# ─── Filter chain merging ────────────────────────────────────────────────────
+
+_MERGEABLE_TYPES = (
+    MirrorStep, ZoomStep, InvertStep, HueShiftStep, SaturateStep, NormalizeStep,
+)
+
+
+def _group_steps(recipe_steps: list) -> list[list]:
+    """Partition recipe steps into runs of consecutive mergeable steps.
+
+    Non-mergeable steps become singleton groups. Consecutive mergeable steps
+    are collected into a single group so they can be applied in one ffmpeg
+    command instead of separate encode/decode cycles.
+    """
+    groups: list[list] = []
+    current_run: list = []
+    for step in recipe_steps:
+        if isinstance(step, _MERGEABLE_TYPES):
+            current_run.append(step)
+        else:
+            if current_run:
+                groups.append(current_run)
+                current_run = []
+            groups.append([step])
+    if current_run:
+        groups.append(current_run)
+    return groups
+
+
+@task(name="filter-chain")
+def _apply_filter_chain(
+    src: Path,
+    dst: Path,
+    *,
+    steps: list,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Apply multiple ffmpeg video filters in a single encode pass.
+
+    Eliminates intermediate encode/decode cycles when consecutive recipe
+    steps are all pure ffmpeg filter operations.
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+
+    filters: list[str] = []
+    for step in steps:
+        match step:
+            case MirrorStep(axis=axis):
+                filters.append("hflip" if axis == "horizontal" else "vflip")
+            case ZoomStep(factor=factor, center_x=cx, center_y=cy):
+                w, h = info.width, info.height
+                cw = max(2, int(w / factor) & ~1)
+                ch = max(2, int(h / factor) & ~1)
+                cx_px = int((w - cw) * cx)
+                cy_px = int((h - ch) * cy)
+                filters.append(
+                    f"crop={cw}:{ch}:{cx_px}:{cy_px},"
+                    f"scale={w}:{h}:flags=lanczos"
+                )
+            case InvertStep():
+                filters.append("negate")
+            case HueShiftStep(degrees=degrees):
+                filters.append(f"hue=h={degrees}")
+            case SaturateStep(amount=amount):
+                filters.append(f"hue=s={amount}")
+            case NormalizeStep(black_point=bp, white_point=wp):
+                filters.append(
+                    f"colorlevels="
+                    f"rimin={bp}:gimin={bp}:bimin={bp}:"
+                    f"rimax={wp}:gimax={wp}:bimax={wp}"
+                )
+
+    vf = ",".join(filters)
+
+    subprocess.run([
+        c.ffmpeg_bin, "-y", "-loglevel", c.ffmpeg_loglevel,
+        "-i", str(src),
+        "-vf", vf,
+        "-an",
+        *c.encode_args(),
+        str(dst),
+    ], check=True)
+
+    return dst
+
+
 def _submit_step(
     step,
     src,
@@ -899,16 +987,27 @@ def _process_lane(
     work = cfg.work_dir / f"bw_{recipe_tag}_lane_{lane_idx:02d}"
     work.mkdir(parents=True, exist_ok=True)
 
+    groups = _group_steps(lane.recipe)
+
     final_futures = []
     for seg_idx, seg_source in enumerate(source_items):
         seg_rng = random.Random(rng.randint(0, 2 ** 31))
         current = seg_source  # Path or future
 
-        for step_idx, step in enumerate(lane.recipe):
-            dst = work / f"seg_{seg_idx:03d}_s{step_idx}.mp4"
-            current = _submit_step(
-                step, current, dst, seg_rng, shader_cache, recipe, cfg,
-            )
+        output_idx = 0
+        for group in groups:
+            dst = work / f"seg_{seg_idx:03d}_s{output_idx}.mp4"
+            if len(group) >= 2 and isinstance(group[0], _MERGEABLE_TYPES):
+                # Merge consecutive ffmpeg filters into one encode pass
+                current = _apply_filter_chain.submit(
+                    current, dst, steps=group, cfg=cfg,
+                )
+            else:
+                current = _submit_step(
+                    group[0], current, dst, seg_rng,
+                    shader_cache, recipe, cfg,
+                )
+            output_idx += 1
 
         final_futures.append(current)
 
