@@ -464,3 +464,432 @@ def composite_recipe(
         post=post or [NormalizeStep()],
         seed=seed,
     )
+
+
+def temporal_sandwich_recipe(
+    src: Path,
+    *,
+    n_segments: int = 8,
+    n_shaders: int = 2,
+    sequencing: str = "shuffle",
+    seed: Optional[int] = None,
+) -> BrainWipeRecipe:
+    """Time as the crusher: scrub → shaders → echo → shaders → patch → normalize.
+
+    Temporal destruction replaces bitrate crush — the footage is already
+    dreaming before color processing hits.
+    """
+    return BrainWipeRecipe(
+        lanes=[Lane(
+            source=FootageSource(src),
+            n_segments=n_segments,
+            recipe=[
+                ScrubStep(intensity=0.7, smoothness=1.5),
+                ShaderStep(n_shaders=n_shaders),
+                EchoStep(delay=0.05, trail=0.85),
+                ShaderStep(n_shaders=n_shaders),
+                PatchStep(patch_min=0.03, patch_max=0.25),
+                NormalizeStep(),
+            ],
+            sequencing=sequencing,
+        )],
+        seed=seed,
+    )
+
+
+def deep_time_recipe(
+    src: Path,
+    *,
+    n_segments: int = 8,
+    seed: Optional[int] = None,
+) -> BrainWipeRecipe:
+    """Recursive temporal folding: drift → pingpong → echo → scrub → shader.
+
+    Stacks time effects in sequence — footage is folded through time until
+    it becomes abstract texture. A single color shader at the end is all
+    the visual processing needed.
+    """
+    return BrainWipeRecipe(
+        lanes=[Lane(
+            source=FootageSource(src, method="scene"),
+            n_segments=n_segments,
+            recipe=[
+                DriftStep(loop_dur=2.0),
+                PingPongStep(window=0.8),
+                EchoStep(delay=0.0, trail=0.9),
+                ScrubStep(intensity=0.9, smoothness=0.5),
+                ShaderStep(n_shaders=1),
+                NormalizeStep(),
+            ],
+            sequencing="shuffle",
+        )],
+        seed=seed,
+    )
+
+
+def hybrid_composite_recipe(
+    src: Path,
+    *,
+    n_segments: int = 10,
+    crush: float = 0.85,
+    n_shaders: int = 3,
+    segment_dur: float = 20.0,
+    n_warps: int = 3,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    composite: Optional[CompositeSpec] = None,
+    seed: Optional[int] = None,
+    brain_wipe_dir: Optional[Path] = None,
+) -> BrainWipeRecipe:
+    """Footage meets generator: crushed footage + generator wash, composited via motion mask.
+
+    Movement in the footage opens windows into the generator layer.
+    Still moments show pure generator; action reveals glitched footage.
+
+    width/height: resolution for generator lane. Must match source footage
+    for masked/blend compositing. If None, defaults to 1920x1080.
+    """
+    if composite is None:
+        composite = MaskedComposite(mask_type="motion")
+
+    w = width or 1920
+    h = height or 1080
+
+    return BrainWipeRecipe(
+        lanes=[
+            Lane(
+                source=FootageSource(src),
+                n_segments=n_segments,
+                recipe=[
+                    CrushStep(crush=crush),
+                    ShaderStep(n_shaders=n_shaders),
+                    CrushStep(crush=crush + 0.05),
+                    NormalizeStep(),
+                ],
+                sequencing="shuffle",
+            ),
+            Lane(
+                source=GeneratorSource(
+                    duration=segment_dur,
+                    n_warps=n_warps,
+                ),
+                n_segments=n_segments,
+                recipe=[NormalizeStep()],
+                sequencing="shuffle",
+            ),
+        ],
+        composite=composite,
+        post=[NormalizeStep()],
+        width=w,
+        height=h,
+        seed=seed,
+        brain_wipe_dir=brain_wipe_dir or Path("brain-wipe-shaders"),
+    )
+
+
+def codec_spectrum_recipe(
+    src: Path,
+    *,
+    n_segments: int = 8,
+    n_shaders: int = 2,
+    sequencing: str = "shuffle",
+    seed: Optional[int] = None,
+) -> BrainWipeRecipe:
+    """Multi-codec crush cascade: mpeg2 → shaders → mpeg4 → shaders → x264 → normalize.
+
+    Three codecs with different artifact characters layered like geological strata.
+    MPEG-2 = chunky VHS, MPEG-4 = organic DivX warping, x264 = sharp macroblocking.
+    """
+    return BrainWipeRecipe(
+        lanes=[Lane(
+            source=FootageSource(src),
+            n_segments=n_segments,
+            recipe=[
+                CrushStep(crush=0.7, codec="mpeg2video"),
+                ShaderStep(n_shaders=n_shaders),
+                CrushStep(crush=0.85, codec="mpeg4"),
+                ShaderStep(n_shaders=1),
+                CrushStep(crush=0.95, codec="libx264"),
+                NormalizeStep(),
+            ],
+            sequencing=sequencing,
+        )],
+        seed=seed,
+    )
+
+
+def breathing_wall_recipe(
+    src: Path,
+    *,
+    n_shaders: int = 2,
+    composite: Optional[CompositeSpec] = None,
+    seed: Optional[int] = None,
+) -> BrainWipeRecipe:
+    """Visual polyrhythm: three lanes with different ping-pong rates, screen-blended.
+
+    Lanes breathe at 0.3s, 0.7s, and 1.2s with echo trails. Screen blend
+    preserves brightness from all layers. Creates a living, pulsing wall
+    of texture — perfect for drone sets.
+    """
+    if composite is None:
+        composite = BlendComposite(mode="screen", opacity=0.5)
+
+    rates = [(0.3, 6, 0.92), (0.7, 8, 0.85), (1.2, 10, 0.8)]
+    lanes = []
+    for window, n_seg, trail in rates:
+        lanes.append(Lane(
+            source=FootageSource(src),
+            n_segments=n_seg,
+            recipe=[
+                PingPongStep(window=window),
+                EchoStep(delay=0.0, trail=trail),
+                ShaderStep(n_shaders=n_shaders if window < 1.0 else 1),
+            ],
+            sequencing="shuffle",
+        ))
+
+    return BrainWipeRecipe(
+        lanes=lanes,
+        composite=composite,
+        post=[NormalizeStep()],
+        seed=seed,
+    )
+
+
+def erosion_recipe(
+    src: Path,
+    *,
+    n_segments: int = 8,
+    sequencing: str = "shuffle",
+    seed: Optional[int] = None,
+) -> BrainWipeRecipe:
+    """Progressive downscale crush: 2x → 4x → 8x with shaders between passes.
+
+    Footage erodes into increasingly massive blocks. Shaders process
+    the blocky texture at each scale. Structural/brutalist aesthetic.
+    """
+    return BrainWipeRecipe(
+        lanes=[Lane(
+            source=FootageSource(src),
+            n_segments=n_segments,
+            recipe=[
+                CrushStep(crush=0.6, downscale=2.0),
+                ShaderStep(n_shaders=1),
+                CrushStep(crush=0.7, downscale=4.0),
+                ShaderStep(n_shaders=1),
+                CrushStep(crush=0.8, downscale=8.0),
+                NormalizeStep(),
+            ],
+            sequencing=sequencing,
+        )],
+        seed=seed,
+    )
+
+
+def palimpsest_recipe(
+    src: Path,
+    *,
+    n_segments: int = 8,
+    composite: Optional[CompositeSpec] = None,
+    seed: Optional[int] = None,
+) -> BrainWipeRecipe:
+    """Overwritten memory: same footage, two recipes, composited via edge mask.
+
+    Lane A (dark/heavy) lives in the contours; Lane B (light/temporal)
+    lives in the flat areas. Two memories of the same moment on one surface.
+    """
+    if composite is None:
+        composite = MaskedComposite(mask_type="edge")
+
+    return BrainWipeRecipe(
+        lanes=[
+            Lane(
+                source=FootageSource(src, method="scene"),
+                n_segments=n_segments,
+                recipe=[
+                    CrushStep(crush=0.95),
+                    ShaderStep(n_shaders=3),
+                    EchoStep(delay=0.1, trail=0.7),
+                ],
+                sequencing="concat",
+            ),
+            Lane(
+                source=FootageSource(src, method="scene"),
+                n_segments=n_segments,
+                recipe=[
+                    ScrubStep(intensity=0.8),
+                    ShaderStep(n_shaders=2),
+                    PingPongStep(window=0.5),
+                    NormalizeStep(),
+                ],
+                sequencing="concat",
+            ),
+        ],
+        composite=composite,
+        post=[NormalizeStep()],
+        seed=seed,
+    )
+
+
+def generator_stooges_recipe(
+    *,
+    segment_counts: list[int] | int = 8,
+    segment_dur: float = 15.0,
+    n_warps: int = 2,
+    crush: float = 0.85,
+    n_shaders: int = 2,
+    static_gap: float = 0.3,
+    seed: Optional[int] = None,
+    brain_wipe_dir: Optional[Path] = None,
+) -> BrainWipeRecipe:
+    """Multi-channel generator CRT: stooges recipe but all-generator, no source footage.
+
+    Each CRT channel shows a different generator shader chain, crush-sandwiched
+    and interleaved with static. Alien TV station aesthetic.
+    """
+    if isinstance(segment_counts, int):
+        segment_counts = [segment_counts]
+
+    steps: list[Step] = [
+        CrushStep(crush=crush),
+        ShaderStep(n_shaders=n_shaders),
+        CrushStep(crush=crush + 0.05),
+        ShaderStep(n_shaders=n_shaders),
+        NormalizeStep(),
+    ]
+
+    return BrainWipeRecipe(
+        lanes=[
+            Lane(
+                source=GeneratorSource(duration=segment_dur, n_warps=n_warps),
+                n_segments=count,
+                recipe=steps,
+                sequencing="shuffle",
+                static_gap=static_gap,
+            )
+            for count in segment_counts
+        ],
+        seed=seed,
+        brain_wipe_dir=brain_wipe_dir or Path("brain-wipe-shaders"),
+    )
+
+
+def gradient_dissolve_recipe(
+    src: Path,
+    *,
+    n_segments: int = 8,
+    crush: float = 0.9,
+    n_shaders: int = 3,
+    segment_dur: float = 20.0,
+    n_warps: int = 2,
+    direction: str = "radial",
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    seed: Optional[int] = None,
+    brain_wipe_dir: Optional[Path] = None,
+) -> BrainWipeRecipe:
+    """Spatial wipe composite: footage + generator via gradient mask.
+
+    A radial/horizontal/vertical gradient mask creates spatial zones —
+    one treatment in the center, another at the edges. Portal effect.
+
+    width/height: resolution for generator lane. Must match source footage
+    for masked compositing. If None, defaults to 1920x1080.
+    """
+    w = width or 1920
+    h = height or 1080
+
+    return BrainWipeRecipe(
+        lanes=[
+            Lane(
+                source=FootageSource(src),
+                n_segments=n_segments,
+                recipe=[
+                    CrushStep(crush=crush),
+                    ShaderStep(n_shaders=n_shaders),
+                ],
+                sequencing="shuffle",
+            ),
+            Lane(
+                source=GeneratorSource(duration=segment_dur, n_warps=n_warps),
+                n_segments=n_segments,
+                recipe=[NormalizeStep()],
+                sequencing="shuffle",
+            ),
+        ],
+        composite=MaskedComposite(
+            mask_type="gradient",
+            mask_params={"direction": direction},
+        ),
+        post=[NormalizeStep()],
+        width=w,
+        height=h,
+        seed=seed,
+        brain_wipe_dir=brain_wipe_dir or Path("brain-wipe-shaders"),
+    )
+
+
+def accretion_recipe(
+    src: Path,
+    *,
+    n_segments: int = 12,
+    composite: Optional[CompositeSpec] = None,
+    seed: Optional[int] = None,
+) -> BrainWipeRecipe:
+    """Layer-by-layer buildup: four lanes at escalating destruction, screen-blended.
+
+    Lane A = barely touched, Lane D = destroyed. Screen blend accumulates
+    all layers — recognizable structure from light processing, texture and
+    chaos from heavy. Geological layering.
+    """
+    if composite is None:
+        composite = BlendComposite(mode="screen", opacity=0.4)
+
+    return BrainWipeRecipe(
+        lanes=[
+            # A: barely touched
+            Lane(
+                source=FootageSource(src, method="scene"),
+                n_segments=n_segments,
+                recipe=[ShaderStep(n_shaders=1)],
+                sequencing="concat",
+            ),
+            # B: moderate
+            Lane(
+                source=FootageSource(src, method="scene"),
+                n_segments=n_segments,
+                recipe=[
+                    CrushStep(crush=0.6),
+                    ShaderStep(n_shaders=2),
+                    EchoStep(delay=0.0, trail=0.7),
+                ],
+                sequencing="concat",
+            ),
+            # C: heavy
+            Lane(
+                source=FootageSource(src, method="scene"),
+                n_segments=n_segments,
+                recipe=[
+                    CrushStep(crush=0.85),
+                    ShaderStep(n_shaders=3),
+                    ScrubStep(intensity=0.5),
+                ],
+                sequencing="concat",
+            ),
+            # D: destroyed
+            Lane(
+                source=FootageSource(src, method="scene"),
+                n_segments=n_segments,
+                recipe=[
+                    CrushStep(crush=0.95, downscale=4.0),
+                    ShaderStep(n_shaders=4),
+                    PatchStep(patch_min=0.05, patch_max=0.3),
+                    CrushStep(crush=1.0),
+                ],
+                sequencing="concat",
+            ),
+        ],
+        composite=composite,
+        post=[NormalizeStep()],
+        seed=seed,
+    )

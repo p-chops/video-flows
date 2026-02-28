@@ -130,6 +130,16 @@ A `BrainWipeRecipe` describes: **lanes** (parallel processing streams), **compos
 - `stooges_recipe(src, segment_counts=[8,10,12])` — multi-channel CRT content
 - `generator_render_recipe()` — generator shaders + warp chains, no source needed
 - `composite_recipe(src)` — two lanes composited via mask
+- `temporal_sandwich_recipe(src)` — scrub → shaders → echo → shaders → patch (time as the crusher)
+- `deep_time_recipe(src)` — drift → pingpong → echo → scrub → shader (recursive temporal folding)
+- `hybrid_composite_recipe(src)` — footage + generator lanes, motion mask composite
+- `codec_spectrum_recipe(src)` — mpeg2 → mpeg4 → x264 multi-codec crush cascade
+- `breathing_wall_recipe(src)` — 3 lanes at different ping-pong rates, screen-blended polyrhythm
+- `erosion_recipe(src)` — progressive downscale crush (2x → 4x → 8x)
+- `palimpsest_recipe(src)` — same footage, two recipes, edge mask composite (overwritten memory)
+- `generator_stooges_recipe()` — stooges but all-generator, no source (alien TV station)
+- `gradient_dissolve_recipe(src)` — footage + generator via gradient mask (portal effect)
+- `accretion_recipe(src)` — 4 lanes at escalating destruction, screen-blended (geological layering)
 
 **Recipe utilities**: `print_recipe()` pretty-prints, `hash_recipe()` returns 8-char hex hash for output naming.
 
@@ -149,6 +159,10 @@ brain_wipe(crush_sandwich_recipe(Path("source/footage.mp4"), seed=42))
 python -m pipeline.flows.brain_wipe brain-wipe --preset crush-sandwich source.mp4 --seed 42
 python -m pipeline.flows.brain_wipe brain-wipe --preset stooges source.mp4 --segment-counts 8,10,12
 python -m pipeline.flows.brain_wipe brain-wipe --preset generator-render -n 12 --seed 42
+python -m pipeline.flows.brain_wipe brain-wipe --preset temporal-sandwich source.mp4 --seed 42
+python -m pipeline.flows.brain_wipe brain-wipe --preset breathing-wall source.mp4 --seed 42
+python -m pipeline.flows.brain_wipe brain-wipe --preset generator-stooges --segment-counts 6,8,10,8,6 --seed 42
+python -m pipeline.flows.brain_wipe brain-wipe --preset accretion source.mp4 --seed 42
 ```
 
 **`warp_chain`**: Apply a chain of warp shaders to source footage. Single input → single output. Filters to `["Warp", "Brain Wipe"]` categories by default.

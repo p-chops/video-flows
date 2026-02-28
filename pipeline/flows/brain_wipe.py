@@ -93,6 +93,7 @@ from ..tasks import (
     edge_mask,
     generate_solid,
     generate_static,
+    gradient_mask,
     luma_mask,
     masked_composite,
     motion_mask,
@@ -611,10 +612,11 @@ def _materialize_generator_source(
     rng: random.Random,
     shader_cache: dict[str, dict[str, ISFShader]],
     recipe: BrainWipeRecipe,
+    recipe_tag: str,
     cfg: Config,
 ) -> list:
     """Generate segments via generator shaders. Returns list of futures."""
-    work = cfg.work_dir / f"bw_lane_{lane_idx:02d}"
+    work = cfg.work_dir / f"bw_{recipe_tag}_lane_{lane_idx:02d}"
     work.mkdir(parents=True, exist_ok=True)
 
     bw_dir = recipe.brain_wipe_dir
@@ -685,6 +687,7 @@ def _materialize_source(
     rng: random.Random,
     shader_cache: dict[str, dict[str, ISFShader]],
     recipe: BrainWipeRecipe,
+    recipe_tag: str,
     cfg: Config,
 ) -> list:
     """
@@ -692,7 +695,7 @@ def _materialize_source(
     Returns a list of Paths or Prefect futures (for generator sources).
     """
     source = lane.source
-    work = cfg.work_dir / f"bw_lane_{lane_idx:02d}"
+    work = cfg.work_dir / f"bw_{recipe_tag}_lane_{lane_idx:02d}"
     work.mkdir(parents=True, exist_ok=True)
 
     match source:
@@ -720,7 +723,7 @@ def _materialize_source(
                   f"({source.duration:.0f}s, {source.n_warps} warps)")
             return _materialize_generator_source(
                 source, lane.n_segments, lane_idx, rng,
-                shader_cache, recipe, cfg,
+                shader_cache, recipe, recipe_tag, cfg,
             )
 
         case StaticSource(duration=dur):
@@ -754,6 +757,7 @@ def _process_lane(
     rng: random.Random,
     shader_cache: dict[str, dict[str, ISFShader]],
     recipe: BrainWipeRecipe,
+    recipe_tag: str,
     cfg: Config,
 ) -> list[Path]:
     """
@@ -767,7 +771,7 @@ def _process_lane(
             for item in source_items
         ]
 
-    work = cfg.work_dir / f"bw_lane_{lane_idx:02d}"
+    work = cfg.work_dir / f"bw_{recipe_tag}_lane_{lane_idx:02d}"
     work.mkdir(parents=True, exist_ok=True)
 
     final_futures = []
@@ -796,16 +800,17 @@ def _sequence_lane(
     processed: list[Path],
     rng: random.Random,
     recipe: BrainWipeRecipe,
+    recipe_tag: str,
     cfg: Config,
 ) -> Path:
     """Sequence processed segments into a single output per lane."""
-    out = cfg.work_dir / f"bw_lane_{lane_idx:02d}_seq.mp4"
+    out = cfg.work_dir / f"bw_{recipe_tag}_lane_{lane_idx:02d}_seq.mp4"
 
     # Interleave static if requested
     if lane.static_gap > 0:
         # Match static resolution to actual segment resolution (not recipe defaults)
         seg_info = probe(processed[0], cfg)
-        static_path = cfg.work_dir / f"bw_lane_{lane_idx:02d}_static.mp4"
+        static_path = cfg.work_dir / f"bw_{recipe_tag}_lane_{lane_idx:02d}_static.mp4"
         generate_static(
             static_path, lane.static_gap,
             width=seg_info.width, height=seg_info.height,
@@ -830,17 +835,18 @@ def _sequence_lane(
 def _composite_lanes(
     lane_paths: list[Path],
     recipe: BrainWipeRecipe,
+    recipe_tag: str,
     cfg: Config,
 ) -> Path:
     """Composite multiple lane outputs according to the recipe's CompositeSpec."""
-    out = cfg.work_dir / "bw_composited.mp4"
+    out = cfg.work_dir / f"bw_{recipe_tag}_composited.mp4"
 
     match recipe.composite:
         case BlendComposite(mode=mode, opacity=opacity):
             # Fold: blend lane0+lane1, then result+lane2, etc.
             current = lane_paths[0]
             for i, overlay in enumerate(lane_paths[1:], 1):
-                dst = cfg.work_dir / f"bw_blend_{i}.mp4"
+                dst = cfg.work_dir / f"bw_{recipe_tag}_blend_{i}.mp4"
                 blend_layers(current, overlay, dst,
                              mode=mode, opacity=opacity, cfg=cfg)
                 current = dst
@@ -848,24 +854,39 @@ def _composite_lanes(
 
         case MaskedComposite(mask_type=mask_type, mask_params=params):
             # Generate mask from base lane, composite overlay onto base
-            mask_path = cfg.work_dir / "bw_composite_mask.mp4"
-            mask_fns = {
-                "luma": luma_mask,
-                "edge": edge_mask,
-                "motion": motion_mask,
-            }
-            mask_fn = mask_fns.get(mask_type)
-            if mask_fn is None:
-                raise ValueError(
-                    f"Unsupported mask type for compositing: {mask_type}. "
-                    f"Available: {list(mask_fns.keys())}"
+            mask_path = cfg.work_dir / f"bw_{recipe_tag}_composite_mask.mp4"
+
+            if mask_type == "gradient":
+                # Gradient mask is synthetic — generated from dimensions,
+                # not derived from source video
+                base_info = probe(lane_paths[0], cfg)
+                gradient_mask(
+                    mask_path,
+                    width=base_info.width,
+                    height=base_info.height,
+                    duration=base_info.duration,
+                    fps=base_info.fps,
+                    direction=params.get("direction", "horizontal"),
+                    cfg=cfg,
                 )
-            mask_fn(lane_paths[0], mask_path, **params, cfg=cfg)
+            else:
+                mask_fns = {
+                    "luma": luma_mask,
+                    "edge": edge_mask,
+                    "motion": motion_mask,
+                }
+                mask_fn = mask_fns.get(mask_type)
+                if mask_fn is None:
+                    raise ValueError(
+                        f"Unsupported mask type for compositing: {mask_type}. "
+                        f"Available: {list(mask_fns.keys()) + ['gradient']}"
+                    )
+                mask_fn(lane_paths[0], mask_path, **params, cfg=cfg)
 
             # Fold: composite lane0+lane1 via mask, then result+lane2, etc.
             current = lane_paths[0]
             for i, overlay in enumerate(lane_paths[1:], 1):
-                dst = cfg.work_dir / f"bw_masked_{i}.mp4"
+                dst = cfg.work_dir / f"bw_{recipe_tag}_masked_{i}.mp4"
                 masked_composite(current, overlay, mask_path, dst, cfg=cfg)
                 current = dst
             shutil.copy2(current, out)
@@ -929,25 +950,25 @@ def brain_wipe(
 
         # Materialise source segments
         source_items = _materialize_source(
-            lane, lane_idx, lane_rng, shader_cache, recipe, c,
+            lane, lane_idx, lane_rng, shader_cache, recipe, recipe_tag, c,
         )
 
         # Process through recipe steps
         processed = _process_lane(
             lane, lane_idx, source_items, lane_rng,
-            shader_cache, recipe, c,
+            shader_cache, recipe, recipe_tag, c,
         )
 
         # Sequence into single output
         sequenced = _sequence_lane(
-            lane, lane_idx, processed, lane_rng, recipe, c,
+            lane, lane_idx, processed, lane_rng, recipe, recipe_tag, c,
         )
         lane_outputs.append(sequenced)
 
     # ── Composite lanes ───────────────────────────────────────────────────
 
     if recipe.composite is not None and len(lane_outputs) > 1:
-        result = _composite_lanes(lane_outputs, recipe, c)
+        result = _composite_lanes(lane_outputs, recipe, recipe_tag, c)
     elif len(lane_outputs) == 1:
         result = lane_outputs[0]
     else:
@@ -957,7 +978,7 @@ def brain_wipe(
             current = lane_path
             if recipe.post:
                 for step_idx, step in enumerate(recipe.post):
-                    dst = c.work_dir / f"bw_post_ch{i:02d}_s{step_idx}.mp4"
+                    dst = c.work_dir / f"bw_{recipe_tag}_post_ch{i:02d}_s{step_idx}.mp4"
                     post_rng = random.Random(rng.randint(0, 2 ** 31))
                     f = _submit_step(
                         step, current, dst, post_rng, shader_cache, recipe, c,
@@ -974,7 +995,7 @@ def brain_wipe(
     if recipe.post:
         current = result
         for step_idx, step in enumerate(recipe.post):
-            dst = c.work_dir / f"bw_post_s{step_idx}.mp4"
+            dst = c.work_dir / f"bw_{recipe_tag}_post_s{step_idx}.mp4"
             post_rng = random.Random(rng.randint(0, 2 ** 31))
             f = _submit_step(
                 step, current, dst, post_rng, shader_cache, recipe, c,
@@ -1056,7 +1077,13 @@ def _cli():
     p.add_argument("src", type=Path, nargs="?", default=None,
                    help="Source footage (required for footage-based presets)")
     p.add_argument("--preset", type=str, default="crush-sandwich",
-                   choices=["crush-sandwich", "stooges", "generator-render"],
+                   choices=[
+                       "crush-sandwich", "stooges", "generator-render",
+                       "temporal-sandwich", "deep-time", "hybrid-composite",
+                       "codec-spectrum", "breathing-wall", "erosion",
+                       "palimpsest", "generator-stooges", "gradient-dissolve",
+                       "accretion",
+                   ],
                    help="Recipe preset (default: crush-sandwich)")
     p.add_argument("-n", "--n-segments", type=int, default=8)
     p.add_argument("--segment-dur", type=float, default=20.0,
@@ -1122,12 +1149,30 @@ def _cli():
             crush_sandwich_recipe,
             stooges_recipe,
             generator_render_recipe,
+            temporal_sandwich_recipe,
+            deep_time_recipe,
+            hybrid_composite_recipe,
+            codec_spectrum_recipe,
+            breathing_wall_recipe,
+            erosion_recipe,
+            palimpsest_recipe,
+            generator_stooges_recipe,
+            gradient_dissolve_recipe,
+            accretion_recipe,
         )
 
         preset = args.preset
+
+        # -- presets that need source footage --
+        _footage_presets = {
+            "crush-sandwich", "stooges", "temporal-sandwich", "deep-time",
+            "hybrid-composite", "codec-spectrum", "breathing-wall",
+            "erosion", "palimpsest", "gradient-dissolve", "accretion",
+        }
+        if preset in _footage_presets and args.src is None:
+            parser.error(f"{preset} preset requires source footage")
+
         if preset == "crush-sandwich":
-            if args.src is None:
-                parser.error("crush-sandwich preset requires source footage")
             r = crush_sandwich_recipe(
                 args.src,
                 n_segments=args.n_segments,
@@ -1137,8 +1182,6 @@ def _cli():
                 seed=args.seed,
             )
         elif preset == "stooges":
-            if args.src is None:
-                parser.error("stooges preset requires source footage")
             counts = (
                 [int(x) for x in args.segment_counts.split(",")]
                 if args.segment_counts
@@ -1160,6 +1203,88 @@ def _cli():
                 normalize=args.normalize,
                 seed=args.seed,
                 brain_wipe_dir=args.brain_wipe_dir,
+            )
+        elif preset == "temporal-sandwich":
+            r = temporal_sandwich_recipe(
+                args.src,
+                n_segments=args.n_segments,
+                n_shaders=args.n_shaders,
+                seed=args.seed,
+            )
+        elif preset == "deep-time":
+            r = deep_time_recipe(
+                args.src,
+                n_segments=args.n_segments,
+                seed=args.seed,
+            )
+        elif preset == "hybrid-composite":
+            r = hybrid_composite_recipe(
+                args.src,
+                n_segments=args.n_segments,
+                crush=args.crush,
+                n_shaders=args.n_shaders,
+                segment_dur=args.segment_dur,
+                n_warps=args.n_warps,
+                seed=args.seed,
+                brain_wipe_dir=args.brain_wipe_dir,
+            )
+        elif preset == "codec-spectrum":
+            r = codec_spectrum_recipe(
+                args.src,
+                n_segments=args.n_segments,
+                n_shaders=args.n_shaders,
+                seed=args.seed,
+            )
+        elif preset == "breathing-wall":
+            r = breathing_wall_recipe(
+                args.src,
+                n_shaders=args.n_shaders,
+                seed=args.seed,
+            )
+        elif preset == "erosion":
+            r = erosion_recipe(
+                args.src,
+                n_segments=args.n_segments,
+                seed=args.seed,
+            )
+        elif preset == "palimpsest":
+            r = palimpsest_recipe(
+                args.src,
+                n_segments=args.n_segments,
+                seed=args.seed,
+            )
+        elif preset == "generator-stooges":
+            counts = (
+                [int(x) for x in args.segment_counts.split(",")]
+                if args.segment_counts
+                else [6, 8, 10, 8, 6]
+            )
+            r = generator_stooges_recipe(
+                segment_counts=counts,
+                segment_dur=args.segment_dur,
+                n_warps=args.n_warps,
+                crush=args.crush,
+                n_shaders=args.n_shaders,
+                static_gap=args.static_gap,
+                seed=args.seed,
+                brain_wipe_dir=args.brain_wipe_dir,
+            )
+        elif preset == "gradient-dissolve":
+            r = gradient_dissolve_recipe(
+                args.src,
+                n_segments=args.n_segments,
+                crush=args.crush,
+                n_shaders=args.n_shaders,
+                segment_dur=args.segment_dur,
+                n_warps=args.n_warps,
+                seed=args.seed,
+                brain_wipe_dir=args.brain_wipe_dir,
+            )
+        elif preset == "accretion":
+            r = accretion_recipe(
+                args.src,
+                n_segments=args.n_segments,
+                seed=args.seed,
             )
         else:
             parser.error(f"Unknown preset: {preset}")
