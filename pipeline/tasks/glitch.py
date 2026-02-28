@@ -94,14 +94,9 @@ def bitrate_crush(
         c.ffmpeg_bin, "-y", "-loglevel", c.ffmpeg_loglevel,
         "-i", str(crushed),
         "-an",
-        "-c:v", c.default_codec,
-        "-crf", str(c.default_crf),
-        "-pix_fmt", c.default_pix_fmt,
+        *c.encode_args(),
+        str(dst),
     ]
-    if c.default_video_bitrate is not None:
-        br = c.default_video_bitrate
-        clean_cmd += ["-maxrate", f"{br}k", "-bufsize", f"{br * 2}k"]
-    clean_cmd.append(str(dst))
     subprocess.run(clean_cmd, check=True)
 
     # Clean up intermediate

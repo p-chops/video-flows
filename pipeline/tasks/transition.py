@@ -191,8 +191,7 @@ def crossfade(
         "-filter_complex",
         f"[0:v][1:v]xfade=transition=fade:duration={duration}:offset={offset}",
         "-an",
-        "-c:v", c.default_codec, "-crf", str(c.default_crf),
-        "-pix_fmt", c.default_pix_fmt,
+        *c.encode_args(),
         str(dst),
     ], duration=total_dur, logger=log, label="crossfade")
 
@@ -753,8 +752,7 @@ def _xfade_chain(
         *inputs,
         "-filter_complex", filter_graph,
         "-an",
-        "-c:v", cfg.default_codec, "-crf", str(cfg.default_crf),
-        "-pix_fmt", cfg.default_pix_fmt,
+        *cfg.encode_args(),
         str(dst),
     ], duration=total_dur, logger=log, label="xfade-chain")
 

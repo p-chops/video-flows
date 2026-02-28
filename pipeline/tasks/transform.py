@@ -36,8 +36,7 @@ def mirror(
         "-i", str(src),
         "-vf", vf,
         "-an",
-        "-c:v", c.default_codec, "-crf", str(c.default_crf),
-        "-pix_fmt", c.default_pix_fmt,
+        *c.encode_args(),
         str(dst),
     ], check=True)
 
@@ -78,8 +77,7 @@ def zoom(
         "-i", str(src),
         "-vf", vf,
         "-an",
-        "-c:v", c.default_codec, "-crf", str(c.default_crf),
-        "-pix_fmt", c.default_pix_fmt,
+        *c.encode_args(),
         str(dst),
     ], check=True)
 
@@ -101,8 +99,7 @@ def invert(
         "-i", str(src),
         "-vf", "negate",
         "-an",
-        "-c:v", c.default_codec, "-crf", str(c.default_crf),
-        "-pix_fmt", c.default_pix_fmt,
+        *c.encode_args(),
         str(dst),
     ], check=True)
 
@@ -129,8 +126,7 @@ def hue_shift(
         "-i", str(src),
         "-vf", f"hue=h={degrees}",
         "-an",
-        "-c:v", c.default_codec, "-crf", str(c.default_crf),
-        "-pix_fmt", c.default_pix_fmt,
+        *c.encode_args(),
         str(dst),
     ], check=True)
 
@@ -157,8 +153,7 @@ def saturate(
         "-i", str(src),
         "-vf", f"hue=s={amount}",
         "-an",
-        "-c:v", c.default_codec, "-crf", str(c.default_crf),
-        "-pix_fmt", c.default_pix_fmt,
+        *c.encode_args(),
         str(dst),
     ], check=True)
 
