@@ -1074,6 +1074,36 @@ def _sequence_lane(
     return out
 
 
+def _equalize_lane_durations(
+    lane_paths: list[Path],
+    recipe_tag: str,
+    cfg: Config,
+) -> list[Path]:
+    """Loop shorter lanes to match the longest, preventing freeze frames."""
+    durations = [probe(p, cfg).duration for p in lane_paths]
+    max_dur = max(durations)
+    equalized = []
+    for i, (path, dur) in enumerate(zip(lane_paths, durations)):
+        if dur >= max_dur - 0.1:  # close enough
+            equalized.append(path)
+        else:
+            looped = cfg.work_dir / f"bw_{recipe_tag}_lane_{i:02d}_looped.mp4"
+            cmd = [
+                cfg.ffmpeg_bin,
+                "-loglevel", cfg.ffmpeg_loglevel,
+                "-stream_loop", "-1",
+                "-i", str(path),
+                "-t", str(max_dur),
+                "-an",
+                *cfg.encode_args(),
+                "-y", str(looped),
+            ]
+            subprocess.run(cmd, check=True)
+            print(f"    lane {i}: looped {dur:.1f}s → {max_dur:.1f}s")
+            equalized.append(looped)
+    return equalized
+
+
 def _composite_lanes(
     lane_paths: list[Path],
     recipe: BrainWipeRecipe,
@@ -1081,6 +1111,7 @@ def _composite_lanes(
     cfg: Config,
 ) -> Path:
     """Composite multiple lane outputs according to the recipe's CompositeSpec."""
+    lane_paths = _equalize_lane_durations(lane_paths, recipe_tag, cfg)
     out = cfg.work_dir / f"bw_{recipe_tag}_composited.mp4"
 
     match recipe.composite:
