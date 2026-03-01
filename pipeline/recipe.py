@@ -1091,7 +1091,6 @@ def temporal_geology_recipe(
                 EchoStep(delay=0.05, trail=0.85),
                 TemporalTileStep(grid=4, offset_scale=0.6),
                 ShaderStep(n_shaders=1),                   # bake second stratum
-                ExtremaHoldStep(mode="max", decay=0.03),
                 SlipStep(n_bands=6, max_slip=0.4),
                 NormalizeStep(),
             ],
@@ -1578,7 +1577,7 @@ _STEP_POOL: list[tuple[type, int]] = [
     (ScrubStep, 1),       # reduced — causes "stuttering"
     (PingPongStep, 1),    # reduced — causes "breathing"
     (TemporalSortStep, 2),  # per-pixel temporal reordering — alien dissolves
-    (ExtremaHoldStep, 2),   # accumulation trails — long exposure for video
+    # ExtremaHoldStep removed — mode='min' drives to black, mode='max' drives to white
     (FeedbackTransformStep, 2),  # infinite regression / fractal echo
     (QuadLoopStep, 1),            # 4 independent loops in a grid
     # Spatial / color transforms
@@ -1592,7 +1591,7 @@ _STEP_POOL: list[tuple[type, int]] = [
 _TIME_STEPS = (ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
                SlitScanStep, TemporalTileStep, QuadLoopStep, SmearStep, BloomStep,
                StackStep, SlipStep,
-               FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep)
+               FlowWarpStep, TemporalSortStep, FeedbackTransformStep)
 
 _TRANSITION_POOL: list[tuple[str, int]] = [
     ("crossfade", 4),
@@ -2129,7 +2128,6 @@ def _build_deep_time(
     steps: list[Step] = []
     for _ in range(n_time):
         steps.append(_random_time_step(rng, complexity))
-    steps.append(_shader_step(rng, complexity, n=1))
 
     source = _random_source(rng, src, use_generators, complexity)
     lane = _make_lane(rng, source=source, steps=steps, n_segments=actual_segments,

@@ -141,6 +141,7 @@ from ..tasks import (
     temporal_sort,
     extrema_hold,
     feedback_transform,
+    fused_time_chain,
 )
 
 
@@ -588,30 +589,56 @@ def _resolve_shaders_for_step(
     return pick_shader_stack(pool, step.n_shaders, rng, pin_defaults=LEVEL_PARAMS)
 
 
-# ─── Filter chain merging ────────────────────────────────────────────────────
+# ─── Step chain merging ──────────────────────────────────────────────────────
 
 _MERGEABLE_TYPES = (
     MirrorStep, ZoomStep, InvertStep, HueShiftStep, SaturateStep, NormalizeStep,
 )
 
+_TIME_STEP_TYPES = (
+    ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
+    SlitScanStep, TemporalTileStep, QuadLoopStep,
+    SmearStep, BloomStep, StackStep, SlipStep,
+    FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
+)
+
+# Time steps that don't consume a seed from the RNG in _submit_step
+_SEEDLESS_TIME_STEPS = (EchoStep, SmearStep, BloomStep, StackStep)
+
 
 def _group_steps(recipe_steps: list) -> list[list]:
-    """Partition recipe steps into runs of consecutive mergeable steps.
+    """Partition recipe steps into runs of consecutive fusible steps.
 
-    Non-mergeable steps become singleton groups. Consecutive mergeable steps
-    are collected into a single group so they can be applied in one ffmpeg
-    command instead of separate encode/decode cycles.
+    Three group types:
+    - Consecutive _MERGEABLE_TYPES → merged ffmpeg filter chain
+    - Consecutive _TIME_STEP_TYPES → fused time effect chain
+    - Anything else → singleton group
     """
     groups: list[list] = []
     current_run: list = []
+    current_kind: Optional[str] = None  # "mergeable" | "time"
+
     for step in recipe_steps:
         if isinstance(step, _MERGEABLE_TYPES):
+            kind = "mergeable"
+        elif isinstance(step, _TIME_STEP_TYPES):
+            kind = "time"
+        else:
+            kind = None
+
+        if kind is not None and kind == current_kind:
             current_run.append(step)
         else:
             if current_run:
                 groups.append(current_run)
                 current_run = []
-            groups.append([step])
+            if kind is not None:
+                current_run = [step]
+                current_kind = kind
+            else:
+                groups.append([step])
+                current_kind = None
+
     if current_run:
         groups.append(current_run)
     return groups
@@ -1012,6 +1039,17 @@ def _process_lane(
                 current = _apply_filter_chain.submit(
                     current, dst, steps=group, cfg=cfg,
                 )
+            elif len(group) >= 2 and isinstance(group[0], _TIME_STEP_TYPES):
+                # Fuse consecutive time effects into one decode-process-encode pass
+                step_seeds = []
+                for step in group:
+                    if isinstance(step, _SEEDLESS_TIME_STEPS):
+                        step_seeds.append((step, None))
+                    else:
+                        step_seeds.append((step, seg_rng.randint(0, 2 ** 31)))
+                current = fused_time_chain.submit(
+                    current, dst, steps=step_seeds, cfg=cfg,
+                )
             else:
                 current = _submit_step(
                     group[0], current, dst, seg_rng,
@@ -1312,13 +1350,26 @@ def brain_wipe(
         for i, lane_path in enumerate(lane_outputs):
             current = lane_path
             if recipe.post:
-                for step_idx, step in enumerate(recipe.post):
-                    dst = c.work_dir / f"bw_{recipe_tag}_post_ch{i:02d}_s{step_idx}.mp4"
+                post_groups = _group_steps(recipe.post)
+                group_idx = 0
+                for group in post_groups:
+                    dst = c.work_dir / f"bw_{recipe_tag}_post_ch{i:02d}_s{group_idx}.mp4"
                     post_rng = random.Random(rng.randint(0, 2 ** 31))
-                    f = _submit_step(
-                        step, current, dst, post_rng, shader_cache, recipe, c,
-                    )
+                    if len(group) >= 2 and isinstance(group[0], _MERGEABLE_TYPES):
+                        f = _apply_filter_chain.submit(current, dst, steps=group, cfg=c)
+                    elif len(group) >= 2 and isinstance(group[0], _TIME_STEP_TYPES):
+                        step_seeds = [
+                            (s, None if isinstance(s, _SEEDLESS_TIME_STEPS)
+                             else post_rng.randint(0, 2 ** 31))
+                            for s in group
+                        ]
+                        f = fused_time_chain.submit(current, dst, steps=step_seeds, cfg=c)
+                    else:
+                        f = _submit_step(
+                            group[0], current, dst, post_rng, shader_cache, recipe, c,
+                        )
                     current = f.result() if hasattr(f, 'result') else f
+                    group_idx += 1
             out_path = c.output_dir / f"brain_wipe_{recipe_tag}_ch{i:02d}.mp4"
             shutil.copy2(current, out_path)
             final_lanes.append(out_path)
@@ -1331,13 +1382,26 @@ def brain_wipe(
 
     if recipe.post:
         current = result
-        for step_idx, step in enumerate(recipe.post):
-            dst = c.work_dir / f"bw_{recipe_tag}_post_s{step_idx}.mp4"
+        post_groups = _group_steps(recipe.post)
+        group_idx = 0
+        for group in post_groups:
+            dst = c.work_dir / f"bw_{recipe_tag}_post_s{group_idx}.mp4"
             post_rng = random.Random(rng.randint(0, 2 ** 31))
-            f = _submit_step(
-                step, current, dst, post_rng, shader_cache, recipe, c,
-            )
+            if len(group) >= 2 and isinstance(group[0], _MERGEABLE_TYPES):
+                f = _apply_filter_chain.submit(current, dst, steps=group, cfg=c)
+            elif len(group) >= 2 and isinstance(group[0], _TIME_STEP_TYPES):
+                step_seeds = [
+                    (s, None if isinstance(s, _SEEDLESS_TIME_STEPS)
+                     else post_rng.randint(0, 2 ** 31))
+                    for s in group
+                ]
+                f = fused_time_chain.submit(current, dst, steps=step_seeds, cfg=c)
+            else:
+                f = _submit_step(
+                    group[0], current, dst, post_rng, shader_cache, recipe, c,
+                )
             current = f.result() if hasattr(f, 'result') else f
+            group_idx += 1
         result = current
 
     # ── Final output ──────────────────────────────────────────────────────

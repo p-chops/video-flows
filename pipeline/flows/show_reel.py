@@ -76,6 +76,7 @@ def _plan_shows(
     src: Optional[Path] = None,
     footage_ratio: float = 0.4,
     seed: Optional[int] = None,
+    archetype: Optional[str] = None,
     output: Optional[Path] = None,
     cfg: Optional[Config] = None,
 ) -> dict:
@@ -146,10 +147,11 @@ def _plan_shows(
             src=show_src,
             complexity=show_complexity,
             target_dur=dur,
-            use_generators=None if use_footage else True,
+            use_generators=False if use_footage else True,
             n_segments=1,
             use_transitions=False,
             seed=show_seed,
+            archetype=archetype,
         )
         recipe.width = width
         recipe.height = height
@@ -314,6 +316,7 @@ def show_reel(
     src: Optional[Path] = None,
     footage_ratio: float = 0.4,
     seed: Optional[int] = None,
+    archetype: Optional[str] = None,
     output: Optional[Path] = None,
     cleanup: bool = True,
     cfg: Optional[Config] = None,
@@ -330,6 +333,7 @@ def show_reel(
     src:            optional source footage — when provided, some shows use it
     footage_ratio:  probability each show uses footage vs generator (0.0–1.0)
     cleanup:        remove intermediate show clips after joining (default True)
+    archetype:      force all shows to use this archetype (e.g. "deep_time")
     """
     c = cfg or Config()
     manifest = _plan_shows(
@@ -337,7 +341,7 @@ def show_reel(
         min_complexity=min_complexity, max_complexity=max_complexity,
         transition_dur=transition_dur, width=width, height=height,
         src=src, footage_ratio=footage_ratio, seed=seed,
-        output=output, cfg=c,
+        archetype=archetype, output=output, cfg=c,
     )
     # Save manifest alongside the run for reproducibility
     manifest_path = c.work_dir / f"reel_{seed}_manifest.json"
@@ -363,6 +367,7 @@ def show_reel_batch(
     src: Optional[Path] = None,
     footage_ratio: float = 0.5,
     seed: Optional[int] = None,
+    archetype: Optional[str] = None,
     cleanup: bool = True,
     cfg: Optional[Config] = None,
 ) -> list[Path]:
@@ -392,7 +397,7 @@ def show_reel_batch(
             min_complexity=min_complexity, max_complexity=max_complexity,
             transition_dur=transition_dur, width=width, height=height,
             src=src, footage_ratio=footage_ratio, seed=reel_seed,
-            output=out_path, cfg=c,
+            archetype=archetype, output=out_path, cfg=c,
         )
         result = show_reel_render(manifest, cfg=c, cleanup=cleanup)
         results.append(result)
@@ -430,6 +435,8 @@ def _add_plan_args(parser):
     parser.add_argument("--footage-ratio", type=float, default=0.4,
                         help="Fraction of shows that use footage (0.0–1.0)")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--archetype", type=str, default=None,
+                        help="Force a specific archetype for all shows (e.g. deep_time)")
     parser.add_argument("-o", "--output", type=str, default=None)
     parser.add_argument("--no-cleanup", action="store_true",
                         help="Retain intermediate show clips in work dir")
@@ -490,6 +497,7 @@ def main():
             src=Path(args.src) if args.src else None,
             footage_ratio=args.footage_ratio,
             seed=args.seed,
+            archetype=args.archetype,
             output=Path(args.output) if args.output else None,
             cfg=cfg,
         )
@@ -521,6 +529,7 @@ def main():
             src=Path(args.src) if args.src else None,
             footage_ratio=args.footage_ratio,
             seed=args.seed,
+            archetype=args.archetype,
             output=out,
             cleanup=not args.no_cleanup,
         )
@@ -541,6 +550,7 @@ def main():
             src=Path(args.src) if args.src else None,
             footage_ratio=args.footage_ratio,
             seed=args.seed,
+            archetype=args.archetype,
             cleanup=not args.no_cleanup,
         )
 

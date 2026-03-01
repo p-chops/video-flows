@@ -2,12 +2,17 @@
 Temporal manipulation tasks — time scrubbing, drift looping, ping-pong,
 echo trails, temporal patchwork, slit-scan, temporal tile, smear, bloom,
 stack, slip, temporal sort, extrema hold, feedback transform.
+
+Each effect has a _process_* helper (operates on in-memory frame buffers)
+and a @task wrapper (handles file I/O). The fused_time_chain task applies
+multiple effects in a single decode-encode pass.
 """
 
 from __future__ import annotations
 
 import logging
 import time as _time
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +25,10 @@ from ..ffmpeg import FrameWriter, probe, read_frames
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
 def _generate_playhead_curve(
     n_frames: int,
@@ -95,6 +104,59 @@ def _generate_playhead_curve(
     return position
 
 
+def _load_frames(src: Path, cfg: Config) -> list[np.ndarray]:
+    """Load all frames from a video file into RAM."""
+    frames: list[np.ndarray] = []
+    for frame in read_frames(src, cfg):
+        frames.append(frame)
+    if not frames:
+        raise ValueError(f"No frames read from {src}")
+    return frames
+
+
+def _write_frames(
+    frames: list[np.ndarray],
+    dst: Path,
+    info,
+    cfg: Config,
+    label: str,
+) -> Path:
+    """Write a frame buffer to a video file with progress logging."""
+    n = len(frames)
+    with FrameWriter(dst, info, cfg=cfg) as writer:
+        t0 = _time.monotonic()
+        last_log = t0
+        for i, frame in enumerate(frames):
+            writer.write(frame)
+            now = _time.monotonic()
+            if now - last_log >= 5.0:
+                pct = (i + 1) / n * 100
+                logger.info("%s: %.0f%% (%d/%d) elapsed=%.1fs",
+                            label, pct, i + 1, n, now - t0)
+                last_log = now
+    elapsed = _time.monotonic() - t0
+    print(f"  wrote {n} frames in {elapsed:.1f}s → {dst.name}")
+    return dst
+
+
+# ---------------------------------------------------------------------------
+# 1. Time Scrub
+# ---------------------------------------------------------------------------
+
+def _process_scrub(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    smoothness: float = 2.0,
+    intensity: float = 0.5,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Remap timeline via a smooth random playhead curve."""
+    n = len(frames)
+    position = _generate_playhead_curve(n, fps, smoothness, intensity, seed)
+    return [frames[int(round(position[i])) % n] for i in range(n)]
+
+
 @task(name="time-scrub")
 def time_scrub(
     src: Path,
@@ -126,49 +188,64 @@ def time_scrub(
     print(f"time_scrub: {n_frames} frames, {info.duration:.1f}s @ {info.fps}fps")
     print(f"  smoothness={smoothness}, intensity={intensity}, seed={seed}")
 
-    # --- Load all source frames into memory ---
-    frames: list[np.ndarray] = []
-    for frame in read_frames(src, c):
-        frames.append(frame)
+    frames = _load_frames(src, c)
     n_loaded = len(frames)
-
-    if n_loaded == 0:
-        raise ValueError(f"No frames read from {src}")
-
-    # Use actual loaded count (may differ slightly from duration * fps)
     print(f"  loaded {n_loaded} frames ({n_loaded * info.width * info.height * 3 / 1e6:.0f} MB)")
 
-    # --- Generate playhead curve ---
-    position = _generate_playhead_curve(
-        n_loaded, info.fps, smoothness, intensity, seed,
-    )
-
-    # Log playhead stats
+    position = _generate_playhead_curve(n_loaded, info.fps, smoothness, intensity, seed)
     velocity = np.diff(position)
     pct_reverse = (velocity < 0).sum() / max(len(velocity), 1) * 100
     print(f"  playhead: speed range [{velocity.min():.2f}, {velocity.max():.2f}], "
           f"{pct_reverse:.0f}% reverse")
 
-    # --- Write remapped frames ---
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for i in range(n_loaded):
-            src_idx = int(round(position[i])) % n_loaded
-            writer.write(frames[src_idx])
+    output = _process_scrub(frames, info.fps, smoothness=smoothness, intensity=intensity, seed=seed)
+    return _write_frames(output, dst, info, c, "time_scrub")
 
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                pct = (i + 1) / n_loaded * 100
-                elapsed = now - t0
-                logger.info("time_scrub: %.0f%% (%d/%d) elapsed=%.1fs",
-                            pct, i + 1, n_loaded, elapsed)
-                last_log = now
 
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {n_loaded} frames in {elapsed:.1f}s → {dst.name}")
+# ---------------------------------------------------------------------------
+# 2. Drift Loop
+# ---------------------------------------------------------------------------
 
-    return dst
+def _process_drift(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    loop_dur: float = 0.5,
+    drift: Optional[float] = None,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Loop a fixed-length window with per-cycle drift."""
+    rng = np.random.default_rng(seed)
+    n = len(frames)
+    loop_frames = max(1, round(loop_dur * fps))
+    loop_frames = min(loop_frames, n)
+
+    n_cycles = n / loop_frames
+    if drift is None:
+        mag = max(1, round(0.1 * loop_frames))
+        drift_frames = mag if rng.random() > 0.5 else -mag
+    else:
+        raw = round(drift * fps)
+        drift_frames = raw if raw != 0 else (1 if drift >= 0 else -1)
+
+    total_drift = abs(drift_frames) * n_cycles
+    if drift_frames >= 0:
+        max_start = max(0, n - loop_frames - total_drift)
+    else:
+        max_start = n - loop_frames
+        min_start = min(n - loop_frames, total_drift)
+        max_start = max(max_start, min_start)
+
+    start_frame = rng.integers(0, max(1, int(max_start) + 1))
+
+    output = []
+    for out_idx in range(n):
+        cycle = out_idx // loop_frames
+        pos_in_loop = out_idx % loop_frames
+        window_start = start_frame + cycle * drift_frames
+        src_idx = (window_start + pos_in_loop) % n
+        output.append(frames[src_idx])
+    return output
 
 
 @task(name="drift-loop")
@@ -196,78 +273,49 @@ def drift_loop(
     """
     c = cfg or Config()
     info = probe(src, c)
-    rng = np.random.default_rng(seed)
 
-    # --- Load all source frames into memory ---
-    frames: list[np.ndarray] = []
-    for frame in read_frames(src, c):
-        frames.append(frame)
+    frames = _load_frames(src, c)
     n = len(frames)
-
-    if n == 0:
-        raise ValueError(f"No frames read from {src}")
-
     fps = info.fps
+
     loop_frames = max(1, round(loop_dur * fps))
     loop_frames = min(loop_frames, n)
-
     n_cycles = n / loop_frames
-    # Auto-drift: +-10% of loop length, random direction
-    if drift is None:
-        mag = max(1, round(0.1 * loop_frames))
-        drift_frames = mag if rng.random() > 0.5 else -mag
-    else:
-        raw = round(drift * fps)
-        drift_frames = raw if raw != 0 else (1 if drift >= 0 else -1)
 
-    # Random start position — leave room for the loop window
-    # and for drift to run without immediately clamping
-    total_drift = abs(drift_frames) * n_cycles
-    if drift_frames >= 0:
-        # Drifting forward: start early enough that we don't clamp too soon
-        max_start = max(0, n - loop_frames - total_drift)
-    else:
-        # Drifting backward: start late enough to have room behind us
-        max_start = n - loop_frames
-        min_start = min(n - loop_frames, total_drift)
-        max_start = max(max_start, min_start)
-
-    start_frame = rng.integers(0, max(1, int(max_start) + 1))
-
-    direction = "forward" if drift_frames >= 0 else "backward"
     print(f"drift_loop: {n} frames, {info.duration:.1f}s @ {fps}fps")
-    print(f"  loop={loop_frames}f ({loop_frames/fps:.2f}s), "
-          f"drift={drift_frames:+d}f ({drift_frames/fps:+.2f}s/cycle, {direction})")
-    print(f"  start={start_frame}f ({start_frame/fps:.2f}s), "
-          f"{n_cycles:.1f} cycles, seed={seed}")
-
     mem_mb = n * info.width * info.height * 3 / 1e6
     print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
-    # --- Write drift-looped frames ---
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for out_idx in range(n):
-            cycle = out_idx // loop_frames
-            pos_in_loop = out_idx % loop_frames
+    output = _process_drift(frames, fps, loop_dur=loop_dur, drift=drift, seed=seed)
+    return _write_frames(output, dst, info, c, "drift_loop")
 
-            window_start = start_frame + cycle * drift_frames
-            src_idx = (window_start + pos_in_loop) % n
-            writer.write(frames[src_idx])
 
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                pct = (out_idx + 1) / n * 100
-                elapsed = now - t0
-                logger.info("drift_loop: %.0f%% (%d/%d) elapsed=%.1fs",
-                            pct, out_idx + 1, n, elapsed)
-                last_log = now
+# ---------------------------------------------------------------------------
+# 3. Ping-Pong
+# ---------------------------------------------------------------------------
 
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {n} frames in {elapsed:.1f}s → {dst.name}")
+def _process_ping_pong(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    window: float = 0.5,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Play a short subsegment forward-backward continuously."""
+    rng = np.random.default_rng(seed)
+    n = len(frames)
+    win_frames = max(2, round(window * fps))
+    win_frames = min(win_frames, n)
 
-    return dst
+    max_start = n - win_frames
+    start = rng.integers(0, max(1, max_start + 1))
+
+    fwd = list(range(start, start + win_frames))
+    bwd = list(range(start + win_frames - 2, start, -1))
+    cycle = fwd + bwd
+    cycle_len = len(cycle)
+
+    return [frames[cycle[out_idx % cycle_len]] for out_idx in range(n)]
 
 
 @task(name="ping-pong")
@@ -291,62 +339,47 @@ def ping_pong(
     """
     c = cfg or Config()
     info = probe(src, c)
-    rng = np.random.default_rng(seed)
 
-    # --- Load all source frames into memory ---
-    frames: list[np.ndarray] = []
-    for frame in read_frames(src, c):
-        frames.append(frame)
+    frames = _load_frames(src, c)
     n = len(frames)
-
-    if n == 0:
-        raise ValueError(f"No frames read from {src}")
-
     fps = info.fps
     win_frames = max(2, round(window * fps))
     win_frames = min(win_frames, n)
 
-    # Random start position for the window
-    max_start = n - win_frames
-    start = rng.integers(0, max(1, max_start + 1))
-
-    # Build one ping-pong cycle: forward then backward (excluding endpoints
-    # to avoid a double-frame stutter at the turnaround)
-    fwd = list(range(start, start + win_frames))
-    bwd = list(range(start + win_frames - 2, start, -1))  # skip first & last
-    cycle = fwd + bwd
-    cycle_len = len(cycle)
-
-    n_cycles = n / cycle_len
     print(f"ping_pong: {n} frames, {info.duration:.1f}s @ {fps}fps")
-    print(f"  window={win_frames}f ({win_frames/fps:.2f}s), "
-          f"start={start}f ({start/fps:.2f}s)")
-    print(f"  cycle={cycle_len}f ({cycle_len/fps:.2f}s), "
-          f"{n_cycles:.1f} breaths, seed={seed}")
-
     mem_mb = n * info.width * info.height * 3 / 1e6
     print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
-    # --- Write ping-pong frames ---
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for out_idx in range(n):
-            src_idx = cycle[out_idx % cycle_len]
-            writer.write(frames[src_idx])
+    output = _process_ping_pong(frames, fps, window=window, seed=seed)
+    return _write_frames(output, dst, info, c, "ping_pong")
 
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                pct = (out_idx + 1) / n * 100
-                elapsed = now - t0
-                logger.info("ping_pong: %.0f%% (%d/%d) elapsed=%.1fs",
-                            pct, out_idx + 1, n, elapsed)
-                last_log = now
 
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {n} frames in {elapsed:.1f}s → {dst.name}")
+# ---------------------------------------------------------------------------
+# 4. Echo Trail
+# ---------------------------------------------------------------------------
 
-    return dst
+def _process_echo(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    delay: float = 0.0,
+    trail: float = 0.8,
+) -> list[np.ndarray]:
+    """Temporal echo with feedback via ring buffer."""
+    delay_frames = max(1, round(delay * fps)) if delay > 0 else 1
+    ring: deque[np.ndarray] = deque(maxlen=delay_frames)
+    blend_new = 1.0 - trail
+    output = []
+    for frame in frames:
+        f = frame.astype(np.float32)
+        if len(ring) < delay_frames:
+            out = f
+        else:
+            echo_src = ring[0]
+            out = blend_new * f + trail * echo_src
+        ring.append(out.copy())
+        output.append(np.clip(out, 0, 255).astype(np.uint8))
+    return output
 
 
 @task(name="echo-trail")
@@ -389,41 +422,40 @@ def echo_trail(
           f"{info.width}x{info.height}")
     print(f"  {mode}, trail={trail}, buffer={delay_frames}f ({mem_mb:.0f} MB)")
 
-    from collections import deque
-    ring: deque[np.ndarray] = deque(maxlen=delay_frames)
-    blend_new = 1.0 - trail
-    frame_count = 0
+    frames = _load_frames(src, c)
+    output = _process_echo(frames, info.fps, delay=delay, trail=trail)
+    return _write_frames(output, dst, info, c, "echo_trail")
 
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for frame in read_frames(src, c):
-            f = frame.astype(np.float32)
 
-            if len(ring) < delay_frames:
-                # Buffer not yet full — output current frame unblended
-                out = f
-            else:
-                # Blend current frame with the delayed output
-                echo_src = ring[0]  # oldest in ring = delay_frames ago
-                out = blend_new * f + trail * echo_src
+# ---------------------------------------------------------------------------
+# 5. Time Patch
+# ---------------------------------------------------------------------------
 
-            # Push output into ring (feedback — echoes echo themselves)
-            ring.append(out.copy())
-            writer.write(np.clip(out, 0, 255).astype(np.uint8))
-            frame_count += 1
-
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                elapsed = now - t0
-                logger.info("echo_trail: %d frames, elapsed=%.1fs",
-                            frame_count, elapsed)
-                last_log = now
-
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {frame_count} frames in {elapsed:.1f}s → {dst.name}")
-
-    return dst
+def _process_patch(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    patch_min: float = 0.05,
+    patch_max: float = 0.4,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Paste random crops of current frame onto an accumulating canvas."""
+    rng = np.random.default_rng(seed)
+    h, w = frames[0].shape[:2]
+    canvas: Optional[np.ndarray] = None
+    output = []
+    for frame in frames:
+        if canvas is None:
+            canvas = frame.copy()
+        else:
+            frac = rng.uniform(patch_min, patch_max)
+            ph = max(1, round(h * frac))
+            pw = max(1, round(w * frac))
+            y = rng.integers(0, h - ph + 1)
+            x = rng.integers(0, w - pw + 1)
+            canvas[y:y + ph, x:x + pw] = frame[y:y + ph, x:x + pw]
+        output.append(canvas.copy())
+    return output
 
 
 @task(name="time-patch")
@@ -454,46 +486,47 @@ def time_patch(
     """
     c = cfg or Config()
     info = probe(src, c)
-    rng = np.random.default_rng(seed)
 
-    h, w = info.height, info.width
-
-    print(f"time_patch: {info.duration:.1f}s @ {info.fps}fps, {w}x{h}")
+    print(f"time_patch: {info.duration:.1f}s @ {info.fps}fps, {info.width}x{info.height}")
     print(f"  patch range={patch_min:.0%}–{patch_max:.0%}, seed={seed}")
 
-    canvas: Optional[np.ndarray] = None
-    frame_count = 0
+    frames = _load_frames(src, c)
+    output = _process_patch(frames, info.fps, patch_min=patch_min, patch_max=patch_max, seed=seed)
+    return _write_frames(output, dst, info, c, "time_patch")
 
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for frame in read_frames(src, c):
-            if canvas is None:
-                canvas = frame.copy()
+
+# ---------------------------------------------------------------------------
+# 6. Slit Scan
+# ---------------------------------------------------------------------------
+
+def _process_slit_scan(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    axis: str = "horizontal",
+    scan_speed: float = 1.0,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Each row/column samples a different point in time."""
+    rng = np.random.default_rng(seed)
+    n = len(frames)
+    h, w = frames[0].shape[:2]
+    n_slices = h if axis == "horizontal" else w
+    spread = max(1, int(n * scan_speed))
+    start_offset = rng.integers(0, max(1, n))
+    slice_offsets = np.round(np.linspace(0, spread, n_slices)).astype(int)
+
+    output = []
+    for out_idx in range(n):
+        out_frame = np.empty((h, w, 3), dtype=np.uint8)
+        for s in range(n_slices):
+            src_idx = (out_idx + start_offset + slice_offsets[s]) % n
+            if axis == "horizontal":
+                out_frame[s, :, :] = frames[src_idx][s, :, :]
             else:
-                # Random patch size this frame
-                frac = rng.uniform(patch_min, patch_max)
-                ph = max(1, round(h * frac))
-                pw = max(1, round(w * frac))
-                # Random position
-                y = rng.integers(0, h - ph + 1)
-                x = rng.integers(0, w - pw + 1)
-                canvas[y:y + ph, x:x + pw] = frame[y:y + ph, x:x + pw]
-
-            writer.write(canvas)
-            frame_count += 1
-
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                elapsed = now - t0
-                logger.info("time_patch: %d frames, elapsed=%.1fs",
-                            frame_count, elapsed)
-                last_log = now
-
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {frame_count} frames in {elapsed:.1f}s → {dst.name}")
-
-    return dst
+                out_frame[:, s, :] = frames[src_idx][:, s, :]
+        output.append(out_frame)
+    return output
 
 
 @task(name="slit-scan")
@@ -520,61 +553,52 @@ def slit_scan(
     """
     c = cfg or Config()
     info = probe(src, c)
-    rng = np.random.default_rng(seed)
 
-    frames: list[np.ndarray] = []
-    for frame in read_frames(src, c):
-        frames.append(frame)
+    frames = _load_frames(src, c)
     n = len(frames)
 
-    if n == 0:
-        raise ValueError(f"No frames read from {src}")
-
-    h, w = info.height, info.width
-    n_slices = h if axis == "horizontal" else w
-    # Max temporal spread across slices
-    spread = max(1, int(n * scan_speed))
-
-    start_offset = rng.integers(0, max(1, n))
-
     print(f"slit_scan: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
-    print(f"  axis={axis}, spread={spread}f, start_offset={start_offset}")
-    mem_mb = n * w * h * 3 / 1e6
+    print(f"  axis={axis}, scan_speed={scan_speed}")
+    mem_mb = n * info.width * info.height * 3 / 1e6
     print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
-    # Precompute per-slice offsets
-    slice_offsets = np.round(
-        np.linspace(0, spread, n_slices)
-    ).astype(int)
+    output = _process_slit_scan(frames, info.fps, axis=axis, scan_speed=scan_speed, seed=seed)
+    return _write_frames(output, dst, info, c, "slit_scan")
 
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for out_idx in range(n):
-            out_frame = np.empty((h, w, 3), dtype=np.uint8)
 
-            for s in range(n_slices):
-                src_idx = (out_idx + start_offset + slice_offsets[s]) % n
+# ---------------------------------------------------------------------------
+# 7. Temporal Tile
+# ---------------------------------------------------------------------------
 
-                if axis == "horizontal":
-                    out_frame[s, :, :] = frames[src_idx][s, :, :]
-                else:
-                    out_frame[:, s, :] = frames[src_idx][:, s, :]
+def _process_temporal_tile(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    grid: int = 4,
+    offset_scale: float = 1.0,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Divide frame into grid tiles, each showing a different time offset."""
+    rng = np.random.default_rng(seed)
+    n = len(frames)
+    h, w = frames[0].shape[:2]
+    n_tiles = grid * grid
+    max_offset = max(1, int(n * offset_scale))
+    tile_offsets = rng.integers(0, max_offset, size=n_tiles)
+    row_edges = np.linspace(0, h, grid + 1, dtype=int)
+    col_edges = np.linspace(0, w, grid + 1, dtype=int)
 
-            writer.write(out_frame)
-
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                pct = (out_idx + 1) / n * 100
-                elapsed = now - t0
-                logger.info("slit_scan: %.0f%% (%d/%d) elapsed=%.1fs",
-                            pct, out_idx + 1, n, elapsed)
-                last_log = now
-
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {n} frames in {elapsed:.1f}s → {dst.name}")
-
-    return dst
+    output = []
+    for out_idx in range(n):
+        out_frame = np.empty((h, w, 3), dtype=np.uint8)
+        for ti in range(n_tiles):
+            r, ci = divmod(ti, grid)
+            y0, y1 = row_edges[r], row_edges[r + 1]
+            x0, x1 = col_edges[ci], col_edges[ci + 1]
+            src_idx = (out_idx + tile_offsets[ti]) % n
+            out_frame[y0:y1, x0:x1, :] = frames[src_idx][y0:y1, x0:x1, :]
+        output.append(out_frame)
+    return output
 
 
 @task(name="temporal-tile")
@@ -600,60 +624,91 @@ def temporal_tile(
     """
     c = cfg or Config()
     info = probe(src, c)
-    rng = np.random.default_rng(seed)
 
-    frames: list[np.ndarray] = []
-    for frame in read_frames(src, c):
-        frames.append(frame)
+    frames = _load_frames(src, c)
     n = len(frames)
 
-    if n == 0:
-        raise ValueError(f"No frames read from {src}")
-
-    h, w = info.height, info.width
-    n_tiles = grid * grid
-    max_offset = max(1, int(n * offset_scale))
-
-    # Fixed random offset per tile for the whole clip
-    tile_offsets = rng.integers(0, max_offset, size=n_tiles)
-
     print(f"temporal_tile: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
-    print(f"  grid={grid}x{grid} ({n_tiles} tiles), max_offset={max_offset}f")
-    mem_mb = n * w * h * 3 / 1e6
+    print(f"  grid={grid}x{grid}, offset_scale={offset_scale}")
+    mem_mb = n * info.width * info.height * 3 / 1e6
     print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
-    # Precompute tile boundaries
-    row_edges = np.linspace(0, h, grid + 1, dtype=int)
-    col_edges = np.linspace(0, w, grid + 1, dtype=int)
+    output = _process_temporal_tile(frames, info.fps, grid=grid, offset_scale=offset_scale, seed=seed)
+    return _write_frames(output, dst, info, c, "temporal_tile")
 
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for out_idx in range(n):
-            out_frame = np.empty((h, w, 3), dtype=np.uint8)
 
-            for ti in range(n_tiles):
-                r, ci = divmod(ti, grid)
-                y0, y1 = row_edges[r], row_edges[r + 1]
-                x0, x1 = col_edges[ci], col_edges[ci + 1]
+# ---------------------------------------------------------------------------
+# 8. Quad Loop
+# ---------------------------------------------------------------------------
 
-                src_idx = (out_idx + tile_offsets[ti]) % n
-                out_frame[y0:y1, x0:x1, :] = frames[src_idx][y0:y1, x0:x1, :]
+def _process_quad_loop(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    loop_dur: float = 1.0,
+    offset_scale: float = 0.5,
+    layout: str = "grid_2x2",
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """4 independent loops at polyrhythmic rates composited into quadrants."""
+    import cv2
 
-            writer.write(out_frame)
+    rng = np.random.default_rng(seed)
+    n = len(frames)
+    h, w = frames[0].shape[:2]
 
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                pct = (out_idx + 1) / n * 100
-                elapsed = now - t0
-                logger.info("temporal_tile: %.0f%% (%d/%d) elapsed=%.1fs",
-                            pct, out_idx + 1, n, elapsed)
-                last_log = now
+    multipliers = [1.0, 1.25, 0.75, 1.5]
+    base_loop_frames = max(2, int(loop_dur * fps))
 
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {n} frames in {elapsed:.1f}s → {dst.name}")
+    quad_loops = []
+    max_offset = max(1, int(n * offset_scale))
+    for mult in multipliers:
+        loop_len = max(2, int(base_loop_frames * mult))
+        start = int(rng.integers(0, max_offset))
+        quad_loops.append((loop_len, start))
 
-    return dst
+    if layout == "grid_2x2":
+        h2, w2 = h // 2, w // 2
+        regions = [
+            (0, 0, h2, w2),
+            (0, w2, h2, w - w2),
+            (h2, 0, h - h2, w2),
+            (h2, w2, h - h2, w - w2),
+        ]
+    elif layout == "horizontal_bands":
+        band_h = h // 4
+        regions = [
+            (0, 0, band_h, w),
+            (band_h, 0, band_h, w),
+            (band_h * 2, 0, band_h, w),
+            (band_h * 2 + band_h, 0, h - band_h * 3, w),
+        ]
+    else:  # vertical_bands
+        band_w = w // 4
+        regions = [
+            (0, 0, h, band_w),
+            (0, band_w, h, band_w),
+            (0, band_w * 2, h, band_w),
+            (0, band_w * 3, h, w - band_w * 3),
+        ]
+
+    # Pre-resize source frames for each quadrant size
+    quad_resized: list[list[np.ndarray]] = []
+    for q_idx, (y0, x0, qh, qw) in enumerate(regions):
+        resized = [cv2.resize(frame, (qw, qh), interpolation=cv2.INTER_AREA)
+                   for frame in frames]
+        quad_resized.append(resized)
+
+    output = []
+    for out_idx in range(n):
+        out_frame = np.empty((h, w, 3), dtype=np.uint8)
+        for q_idx, (y0, x0, qh, qw) in enumerate(regions):
+            loop_len, start = quad_loops[q_idx]
+            pos = (out_idx + start) % loop_len
+            src_idx = pos % n
+            out_frame[y0:y0 + qh, x0:x0 + qw] = quad_resized[q_idx][src_idx]
+        output.append(out_frame)
+    return output
 
 
 @task(name="quad-loop")
@@ -679,100 +734,49 @@ def quad_loop(
     layout:        "grid_2x2", "horizontal_bands", or "vertical_bands".
     seed:          random seed for start offsets.
     """
-    import cv2
-
     c = cfg or Config()
     info = probe(src, c)
-    rng = np.random.default_rng(seed)
 
-    frames: list[np.ndarray] = []
-    for frame in read_frames(src, c):
-        frames.append(frame)
+    frames = _load_frames(src, c)
     n = len(frames)
 
-    if n == 0:
-        raise ValueError(f"No frames read from {src}")
-
-    h, w = info.height, info.width
-    mem_mb = n * w * h * 3 / 1e6
     print(f"quad_loop: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
     print(f"  layout={layout}, loop_dur={loop_dur:.2f}s, offset_scale={offset_scale:.2f}")
+    mem_mb = n * info.width * info.height * 3 / 1e6
     print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
-    # 4 quadrants with polyrhythmic loop multipliers
-    multipliers = [1.0, 1.25, 0.75, 1.5]
-    base_loop_frames = max(2, int(loop_dur * info.fps))
+    output = _process_quad_loop(
+        frames, info.fps, loop_dur=loop_dur, offset_scale=offset_scale,
+        layout=layout, seed=seed,
+    )
+    return _write_frames(output, dst, info, c, "quad_loop")
 
-    # Per-quadrant: loop length and start offset
-    quad_loops = []
-    max_offset = max(1, int(n * offset_scale))
-    for mult in multipliers:
-        loop_len = max(2, int(base_loop_frames * mult))
-        start = int(rng.integers(0, max_offset))
-        quad_loops.append((loop_len, start))
 
-    # Compute quadrant regions based on layout
-    if layout == "grid_2x2":
-        h2, w2 = h // 2, w // 2
-        regions = [
-            (0, 0, h2, w2),         # top-left
-            (0, w2, h2, w - w2),    # top-right
-            (h2, 0, h - h2, w2),    # bottom-left
-            (h2, w2, h - h2, w - w2),  # bottom-right
-        ]
-    elif layout == "horizontal_bands":
-        band_h = h // 4
-        regions = [
-            (0, 0, band_h, w),
-            (band_h, 0, band_h, w),
-            (band_h * 2, 0, band_h, w),
-            (band_h * 2 + band_h, 0, h - band_h * 3, w),
-        ]
-    else:  # vertical_bands
-        band_w = w // 4
-        regions = [
-            (0, 0, h, band_w),
-            (0, band_w, h, band_w),
-            (0, band_w * 2, h, band_w),
-            (0, band_w * 3, h, w - band_w * 3),
-        ]
+# ---------------------------------------------------------------------------
+# 9. Smear
+# ---------------------------------------------------------------------------
 
-    # Pre-resize source frames for each quadrant size (avoid per-frame resize)
-    quad_resized: list[list[np.ndarray]] = []
-    for q_idx, (y0, x0, qh, qw) in enumerate(regions):
-        resized = []
-        for frame in frames:
-            resized.append(cv2.resize(frame, (qw, qh), interpolation=cv2.INTER_AREA))
-        quad_resized.append(resized)
-        print(f"  quadrant {q_idx}: {qw}x{qh}, loop={quad_loops[q_idx][0]}f, start={quad_loops[q_idx][1]}")
-
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for out_idx in range(n):
-            out_frame = np.empty((h, w, 3), dtype=np.uint8)
-
-            for q_idx, (y0, x0, qh, qw) in enumerate(regions):
-                loop_len, start = quad_loops[q_idx]
-                # Position within this quadrant's loop
-                pos = (out_idx + start) % loop_len
-                src_idx = pos % n
-                out_frame[y0:y0 + qh, x0:x0 + qw] = quad_resized[q_idx][src_idx]
-
-            writer.write(out_frame)
-
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                pct = (out_idx + 1) / n * 100
-                elapsed = now - t0
-                logger.info("quad_loop: %.0f%% (%d/%d) elapsed=%.1fs",
-                            pct, out_idx + 1, n, elapsed)
-                last_log = now
-
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {n} frames in {elapsed:.1f}s → {dst.name}")
-
-    return dst
+def _process_smear(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    threshold: float = 0.1,
+) -> list[np.ndarray]:
+    """Pixels only update when they change beyond a threshold."""
+    abs_threshold = threshold * 255.0
+    canvas: Optional[np.ndarray] = None
+    output = []
+    for frame in frames:
+        if canvas is None:
+            canvas = frame.copy()
+        else:
+            diff = np.abs(
+                frame.astype(np.int16) - canvas.astype(np.int16)
+            ).max(axis=2)
+            mask = diff > abs_threshold
+            canvas[mask] = frame[mask]
+        output.append(canvas.copy())
+    return output
 
 
 @task(name="smear")
@@ -800,43 +804,36 @@ def smear(
     c = cfg or Config()
     info = probe(src, c)
 
-    abs_threshold = threshold * 255.0
-
     print(f"smear: {info.duration:.1f}s @ {info.fps}fps, {info.width}x{info.height}")
-    print(f"  threshold={threshold} (abs={abs_threshold:.1f})")
+    print(f"  threshold={threshold}")
 
-    canvas: Optional[np.ndarray] = None
-    frame_count = 0
+    frames = _load_frames(src, c)
+    output = _process_smear(frames, info.fps, threshold=threshold)
+    return _write_frames(output, dst, info, c, "smear")
 
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for frame in read_frames(src, c):
-            if canvas is None:
-                canvas = frame.copy()
-            else:
-                # Per-pixel max absolute difference across channels
-                diff = np.abs(
-                    frame.astype(np.int16) - canvas.astype(np.int16)
-                ).max(axis=2)
-                # Only update pixels that changed enough
-                mask = diff > abs_threshold
-                canvas[mask] = frame[mask]
 
-            writer.write(canvas)
-            frame_count += 1
+# ---------------------------------------------------------------------------
+# 10. Bloom
+# ---------------------------------------------------------------------------
 
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                elapsed = now - t0
-                logger.info("smear: %d frames, elapsed=%.1fs",
-                            frame_count, elapsed)
-                last_log = now
-
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {frame_count} frames in {elapsed:.1f}s → {dst.name}")
-
-    return dst
+def _process_bloom(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    sensitivity: float = 0.1,
+) -> list[np.ndarray]:
+    """Frame differencing — only show pixels that changed."""
+    gain = 1.0 / max(sensitivity, 0.01)
+    prev: Optional[np.ndarray] = None
+    output = []
+    for frame in frames:
+        if prev is None:
+            output.append(np.zeros_like(frame))
+        else:
+            diff = np.abs(frame.astype(np.float32) - prev.astype(np.float32))
+            output.append(np.clip(diff * gain, 0, 255).astype(np.uint8))
+        prev = frame.copy()
+    return output
 
 
 @task(name="bloom")
@@ -864,42 +861,38 @@ def bloom(
     c = cfg or Config()
     info = probe(src, c)
 
-    gain = 1.0 / max(sensitivity, 0.01)
-
     print(f"bloom: {info.duration:.1f}s @ {info.fps}fps, {info.width}x{info.height}")
-    print(f"  sensitivity={sensitivity}, gain={gain:.1f}x")
+    print(f"  sensitivity={sensitivity}, gain={1.0 / max(sensitivity, 0.01):.1f}x")
 
-    prev: Optional[np.ndarray] = None
-    frame_count = 0
+    frames = _load_frames(src, c)
+    output = _process_bloom(frames, info.fps, sensitivity=sensitivity)
+    return _write_frames(output, dst, info, c, "bloom")
 
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for frame in read_frames(src, c):
-            if prev is None:
-                # First frame: output black
-                out = np.zeros_like(frame)
-            else:
-                diff = np.abs(
-                    frame.astype(np.float32) - prev.astype(np.float32)
-                )
-                out = np.clip(diff * gain, 0, 255).astype(np.uint8)
 
-            prev = frame.copy()
-            writer.write(out)
-            frame_count += 1
+# ---------------------------------------------------------------------------
+# 11. Frame Stack
+# ---------------------------------------------------------------------------
 
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                elapsed = now - t0
-                logger.info("bloom: %d frames, elapsed=%.1fs",
-                            frame_count, elapsed)
-                last_log = now
-
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {frame_count} frames in {elapsed:.1f}s → {dst.name}")
-
-    return dst
+def _process_frame_stack(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    window: int = 8,
+    mode: str = "mean",
+) -> list[np.ndarray]:
+    """Sliding window average/max/min of frames."""
+    ring: deque[np.ndarray] = deque(maxlen=window)
+    reduce_fn = {
+        "mean": lambda buf: np.mean(buf, axis=0).astype(np.uint8),
+        "max": lambda buf: np.max(buf, axis=0).astype(np.uint8),
+        "min": lambda buf: np.min(buf, axis=0).astype(np.uint8),
+    }[mode]
+    output = []
+    for frame in frames:
+        ring.append(frame.astype(np.float32) if mode == "mean" else frame)
+        buf = np.stack(list(ring), axis=0)
+        output.append(reduce_fn(buf))
+    return output
 
 
 @task(name="frame-stack")
@@ -927,44 +920,51 @@ def frame_stack(
     c = cfg or Config()
     info = probe(src, c)
 
-    from collections import deque
-
     print(f"frame_stack: {info.duration:.1f}s @ {info.fps}fps, "
           f"{info.width}x{info.height}")
     mem_mb = window * info.width * info.height * 3 / 1e6
     print(f"  window={window} frames, mode={mode} ({mem_mb:.0f} MB buffer)")
 
-    ring: deque[np.ndarray] = deque(maxlen=window)
-    frame_count = 0
+    frames = _load_frames(src, c)
+    output = _process_frame_stack(frames, info.fps, window=window, mode=mode)
+    return _write_frames(output, dst, info, c, "frame_stack")
 
-    reduce_fn = {
-        "mean": lambda buf: np.mean(buf, axis=0).astype(np.uint8),
-        "max": lambda buf: np.max(buf, axis=0).astype(np.uint8),
-        "min": lambda buf: np.min(buf, axis=0).astype(np.uint8),
-    }[mode]
 
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for frame in read_frames(src, c):
-            ring.append(frame.astype(np.float32) if mode == "mean" else frame)
+# ---------------------------------------------------------------------------
+# 12. Slip
+# ---------------------------------------------------------------------------
 
-            buf = np.stack(list(ring), axis=0)
-            out = reduce_fn(buf)
-            writer.write(out)
-            frame_count += 1
+def _process_slip(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    n_bands: int = 8,
+    max_slip: float = 0.5,
+    axis: str = "horizontal",
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Offset bands of scanlines by different amounts in time."""
+    rng = np.random.default_rng(seed)
+    n = len(frames)
+    h, w = frames[0].shape[:2]
+    max_offset = max(1, int(n * max_slip))
+    band_offsets = rng.integers(-max_offset, max_offset + 1, size=n_bands)
+    dim = h if axis == "horizontal" else w
+    band_edges = np.linspace(0, dim, n_bands + 1, dtype=int)
 
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                elapsed = now - t0
-                logger.info("frame_stack: %d frames, elapsed=%.1fs",
-                            frame_count, elapsed)
-                last_log = now
-
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {frame_count} frames in {elapsed:.1f}s → {dst.name}")
-
-    return dst
+    output = []
+    for out_idx in range(n):
+        out_frame = np.empty((h, w, 3), dtype=np.uint8)
+        for b in range(n_bands):
+            src_idx = (out_idx + band_offsets[b]) % n
+            if axis == "horizontal":
+                y0, y1 = band_edges[b], band_edges[b + 1]
+                out_frame[y0:y1, :, :] = frames[src_idx][y0:y1, :, :]
+            else:
+                x0, x1 = band_edges[b], band_edges[b + 1]
+                out_frame[:, x0:x1, :] = frames[src_idx][:, x0:x1, :]
+        output.append(out_frame)
+    return output
 
 
 @task(name="slip")
@@ -996,61 +996,62 @@ def slip(
     """
     c = cfg or Config()
     info = probe(src, c)
-    rng = np.random.default_rng(seed)
 
-    frames: list[np.ndarray] = []
-    for frame in read_frames(src, c):
-        frames.append(frame)
+    frames = _load_frames(src, c)
     n = len(frames)
 
-    if n == 0:
-        raise ValueError(f"No frames read from {src}")
-
-    h, w = info.height, info.width
-    max_offset = max(1, int(n * max_slip))
-
-    # Fixed random offset per band — symmetric around 0
-    band_offsets = rng.integers(-max_offset, max_offset + 1, size=n_bands)
-
-    dim = h if axis == "horizontal" else w
-    band_edges = np.linspace(0, dim, n_bands + 1, dtype=int)
-
     print(f"slip: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
-    print(f"  {n_bands} bands ({axis}), max_slip={max_slip} ({max_offset}f)")
-    print(f"  offsets: {list(band_offsets)}")
-    mem_mb = n * w * h * 3 / 1e6
+    print(f"  {n_bands} bands ({axis}), max_slip={max_slip}")
+    mem_mb = n * info.width * info.height * 3 / 1e6
     print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for out_idx in range(n):
-            out_frame = np.empty((h, w, 3), dtype=np.uint8)
+    output = _process_slip(frames, info.fps, n_bands=n_bands, max_slip=max_slip, axis=axis, seed=seed)
+    return _write_frames(output, dst, info, c, "slip")
 
-            for b in range(n_bands):
-                src_idx = (out_idx + band_offsets[b]) % n
 
-                if axis == "horizontal":
-                    y0, y1 = band_edges[b], band_edges[b + 1]
-                    out_frame[y0:y1, :, :] = frames[src_idx][y0:y1, :, :]
-                else:
-                    x0, x1 = band_edges[b], band_edges[b + 1]
-                    out_frame[:, x0:x1, :] = frames[src_idx][:, x0:x1, :]
+# ---------------------------------------------------------------------------
+# 13. Flow Warp
+# ---------------------------------------------------------------------------
 
-            writer.write(out_frame)
+def _process_flow_warp(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    amplify: float = 3.0,
+    smooth: int = 15,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Optical-flow motion exaggeration."""
+    import cv2
 
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                pct = (out_idx + 1) / n * 100
-                elapsed = now - t0
-                logger.info("slip: %.0f%% (%d/%d) elapsed=%.1fs",
-                            pct, out_idx + 1, n, elapsed)
-                last_log = now
-
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {n} frames in {elapsed:.1f}s → {dst.name}")
-
-    return dst
+    smooth = max(3, smooth | 1)
+    h, w = frames[0].shape[:2]
+    grid_x, grid_y = np.meshgrid(np.arange(w, dtype=np.float32),
+                                  np.arange(h, dtype=np.float32))
+    prev_gray: Optional[np.ndarray] = None
+    output = []
+    for frame in frames:
+        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        if prev_gray is None:
+            output.append(frame)
+        else:
+            flow = cv2.calcOpticalFlowFarneback(
+                prev_gray, gray, None,
+                pyr_scale=0.5, levels=3, winsize=15,
+                iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
+            )
+            flow[:, :, 0] = cv2.GaussianBlur(flow[:, :, 0], (smooth, smooth), 0)
+            flow[:, :, 1] = cv2.GaussianBlur(flow[:, :, 1], (smooth, smooth), 0)
+            map_x = grid_x + flow[:, :, 0] * amplify
+            map_y = grid_y + flow[:, :, 1] * amplify
+            warped = cv2.remap(
+                frame, map_x, map_y,
+                interpolation=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REFLECT,
+            )
+            output.append(warped)
+        prev_gray = gray
+    return output
 
 
 @task(name="flow-warp")
@@ -1080,78 +1081,55 @@ def flow_warp(
              Higher = smoother warps, fewer artifacts. Default 15.
              Must be odd.
     """
-    import cv2
-
     c = cfg or Config()
     info = probe(src, c)
-
-    # Ensure smooth kernel is odd
-    smooth = max(3, smooth | 1)
 
     print(f"flow_warp: {info.duration:.1f}s @ {info.fps}fps, {info.width}x{info.height}")
     print(f"  amplify={amplify}, smooth={smooth}")
 
-    prev_gray: Optional[np.ndarray] = None
-    frame_count = 0
+    frames = _load_frames(src, c)
+    output = _process_flow_warp(frames, info.fps, amplify=amplify, smooth=smooth, seed=seed)
+    return _write_frames(output, dst, info, c, "flow_warp")
 
-    # Build remap base grids (pixel coordinates)
-    h, w = info.height, info.width
-    grid_x, grid_y = np.meshgrid(np.arange(w, dtype=np.float32),
-                                  np.arange(h, dtype=np.float32))
 
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for frame in read_frames(src, c):
-            gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+# ---------------------------------------------------------------------------
+# 14. Temporal Sort
+# ---------------------------------------------------------------------------
 
-            if prev_gray is None:
-                # First frame — emit unchanged
-                writer.write(frame)
-            else:
-                # Dense optical flow (Farneback)
-                flow = cv2.calcOpticalFlowFarneback(
-                    prev_gray, gray,
-                    None,
-                    pyr_scale=0.5,
-                    levels=3,
-                    winsize=15,
-                    iterations=3,
-                    poly_n=5,
-                    poly_sigma=1.2,
-                    flags=0,
-                )
+def _process_temporal_sort(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    mode: str = "luminance",
+    direction: str = "ascending",
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Sort pixels along time axis by luminance or channel."""
+    n = len(frames)
+    h, w = frames[0].shape[:2]
 
-                # Smooth the flow field to reduce noise
-                flow[:, :, 0] = cv2.GaussianBlur(flow[:, :, 0], (smooth, smooth), 0)
-                flow[:, :, 1] = cv2.GaussianBlur(flow[:, :, 1], (smooth, smooth), 0)
+    vol = np.stack(frames, axis=0)  # (T, H, W, 3)
 
-                # Amplify and build remap coordinates
-                map_x = grid_x + flow[:, :, 0] * amplify
-                map_y = grid_y + flow[:, :, 1] * amplify
+    if mode == "luminance":
+        key = (0.299 * vol[:, :, :, 0].astype(np.float32)
+               + 0.587 * vol[:, :, :, 1].astype(np.float32)
+               + 0.114 * vol[:, :, :, 2].astype(np.float32))
+    elif mode in ("red", "green", "blue"):
+        ch = {"red": 0, "green": 1, "blue": 2}[mode]
+        key = vol[:, :, :, ch].astype(np.float32)
+    else:
+        key = vol[:, :, :, 0].astype(np.float32)
 
-                # Warp the current frame
-                warped = cv2.remap(
-                    frame, map_x, map_y,
-                    interpolation=cv2.INTER_LINEAR,
-                    borderMode=cv2.BORDER_REFLECT,
-                )
-                writer.write(warped)
+    order = np.argsort(key, axis=0)
+    if direction == "descending":
+        order = order[::-1]
 
-            prev_gray = gray
-            frame_count += 1
+    sorted_vol = np.empty_like(vol)
+    for ch in range(3):
+        channel = vol[:, :, :, ch]
+        sorted_vol[:, :, :, ch] = np.take_along_axis(channel, order, axis=0)
 
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                elapsed = now - t0
-                logger.info("flow_warp: %d frames, elapsed=%.1fs",
-                            frame_count, elapsed)
-                last_log = now
-
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {frame_count} frames in {elapsed:.1f}s → {dst.name}")
-
-    return dst
+    return [sorted_vol[i] for i in range(n)]
 
 
 @task(name="temporal-sort")
@@ -1184,72 +1162,62 @@ def temporal_sort(
     c = cfg or Config()
     info = probe(src, c)
 
-    frames: list[np.ndarray] = []
-    for frame in read_frames(src, c):
-        frames.append(frame)
+    frames = _load_frames(src, c)
     n = len(frames)
 
-    if n == 0:
-        raise ValueError(f"No frames read from {src}")
-
-    h, w = info.height, info.width
-    mem_mb = n * w * h * 3 / 1e6
     print(f"temporal_sort: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
     print(f"  mode={mode}, direction={direction}")
+    mem_mb = n * info.width * info.height * 3 / 1e6
     print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
-    # Stack into (T, H, W, 3) volume
-    vol = np.stack(frames, axis=0)  # (T, H, W, 3)
-
-    # Compute sort key per pixel per frame
-    if mode == "luminance":
-        # BT.601 luminance
-        key = (0.299 * vol[:, :, :, 0].astype(np.float32)
-               + 0.587 * vol[:, :, :, 1].astype(np.float32)
-               + 0.114 * vol[:, :, :, 2].astype(np.float32))
-    elif mode in ("red", "green", "blue"):
-        ch = {"red": 0, "green": 1, "blue": 2}[mode]
-        key = vol[:, :, :, ch].astype(np.float32)
-    else:
-        key = vol[:, :, :, 0].astype(np.float32)
-
-    # key shape: (T, H, W)
-    print(f"  sorting {n}x{h}x{w} pixels along time axis...")
     t0 = _time.monotonic()
-
-    # argsort along time axis (axis=0)
-    order = np.argsort(key, axis=0)  # (T, H, W) — indices into time axis
-    if direction == "descending":
-        order = order[::-1]
-
-    # Reorder each channel using the sort indices
-    sorted_vol = np.empty_like(vol)
-    for ch in range(3):
-        channel = vol[:, :, :, ch]  # (T, H, W)
-        sorted_vol[:, :, :, ch] = np.take_along_axis(channel, order, axis=0)
-
+    output = _process_temporal_sort(frames, info.fps, mode=mode, direction=direction, seed=seed)
     sort_elapsed = _time.monotonic() - t0
     print(f"  sorted in {sort_elapsed:.1f}s")
 
-    # Write sorted frames
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for i in range(n):
-            writer.write(sorted_vol[i])
+    return _write_frames(output, dst, info, c, "temporal_sort")
 
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                pct = (i + 1) / n * 100
-                elapsed = now - t0
-                logger.info("temporal_sort: %.0f%% (%d/%d) elapsed=%.1fs",
-                            pct, i + 1, n, elapsed)
-                last_log = now
 
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {n} frames in {elapsed:.1f}s -> {dst.name}")
+# ---------------------------------------------------------------------------
+# 15. Extrema Hold
+# ---------------------------------------------------------------------------
 
-    return dst
+def _process_extrema_hold(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    mode: str = "max",
+    decay: float = 0.0,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Per-pixel max/min accumulation with optional decay."""
+    canvas_max: Optional[np.ndarray] = None
+    canvas_min: Optional[np.ndarray] = None
+    output = []
+    for frame in frames:
+        f = frame.astype(np.float32)
+        if canvas_max is None:
+            canvas_max = f.copy()
+            canvas_min = f.copy()
+        else:
+            if decay > 0:
+                canvas_max += (f - canvas_max) * decay
+                canvas_min += (f - canvas_min) * decay
+            np.maximum(canvas_max, f, out=canvas_max)
+            np.minimum(canvas_min, f, out=canvas_min)
+
+        if mode == "max":
+            out = canvas_max
+        elif mode == "min":
+            out = canvas_min
+        else:  # "both"
+            out = np.stack([
+                canvas_max[:, :, 0],
+                f[:, :, 1],
+                canvas_min[:, :, 2],
+            ], axis=2)
+        output.append(np.clip(out, 0, 255).astype(np.uint8))
+    return output
 
 
 @task(name="extrema-hold")
@@ -1292,54 +1260,58 @@ def extrema_hold(
           f"{info.width}x{info.height}")
     print(f"  mode={mode}, decay={decay}")
 
-    canvas_max: Optional[np.ndarray] = None
-    canvas_min: Optional[np.ndarray] = None
-    frame_count = 0
+    frames = _load_frames(src, c)
+    output = _process_extrema_hold(frames, info.fps, mode=mode, decay=decay, seed=seed)
+    return _write_frames(output, dst, info, c, "extrema_hold")
 
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for frame in read_frames(src, c):
-            f = frame.astype(np.float32)
 
-            if canvas_max is None:
-                canvas_max = f.copy()
-                canvas_min = f.copy()
-            else:
-                # Decay: relax held values toward current frame
-                if decay > 0:
-                    canvas_max += (f - canvas_max) * decay
-                    canvas_min += (f - canvas_min) * decay
+# ---------------------------------------------------------------------------
+# 16. Feedback Transform
+# ---------------------------------------------------------------------------
 
-                # Update extrema
-                np.maximum(canvas_max, f, out=canvas_max)
-                np.minimum(canvas_min, f, out=canvas_min)
+def _process_feedback_transform(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    transform: str = "zoom",
+    amount: float = 0.02,
+    mix: float = 0.7,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Recursive spatial transform on previous output blended with current."""
+    import cv2
 
-            if mode == "max":
-                out = canvas_max
-            elif mode == "min":
-                out = canvas_min
-            else:  # "both" — split channels
-                out = np.stack([
-                    canvas_max[:, :, 0],  # R = max hold (red trails)
-                    f[:, :, 1],           # G = current (live green)
-                    canvas_min[:, :, 2],  # B = min hold (blue shadows)
-                ], axis=2)
-
-            writer.write(np.clip(out, 0, 255).astype(np.uint8))
-            frame_count += 1
-
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                elapsed = now - t0
-                logger.info("extrema_hold: %d frames, elapsed=%.1fs",
-                            frame_count, elapsed)
-                last_log = now
-
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {frame_count} frames in {elapsed:.1f}s -> {dst.name}")
-
-    return dst
+    h, w = frames[0].shape[:2]
+    cx, cy = w / 2.0, h / 2.0
+    prev_out: Optional[np.ndarray] = None
+    output = []
+    for frame in frames:
+        f = frame.astype(np.float32)
+        if prev_out is None:
+            out = f
+        else:
+            if transform == "zoom":
+                s = 1.0 + amount
+                M = cv2.getRotationMatrix2D((cx, cy), 0, s)
+            elif transform == "rotate":
+                deg = amount * (180.0 / 3.14159265)
+                M = cv2.getRotationMatrix2D((cx, cy), deg, 1.0)
+            elif transform == "spiral":
+                s = 1.0 + amount
+                deg = amount * 0.5 * (180.0 / 3.14159265)
+                M = cv2.getRotationMatrix2D((cx, cy), deg, s)
+            else:  # "shift"
+                M = np.float64([[1, 0, amount * w],
+                                [0, 1, 0]])
+            warped = cv2.warpAffine(
+                prev_out, M, (w, h),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REFLECT,
+            )
+            out = (1.0 - mix) * f + mix * warped
+        prev_out = out.copy()
+        output.append(np.clip(out, 0, 255).astype(np.uint8))
+    return output
 
 
 @task(name="feedback-transform")
@@ -1385,8 +1357,6 @@ def feedback_transform(
                Default 0.7.
     seed:      unused, kept for interface consistency.
     """
-    import cv2
-
     c = cfg or Config()
     info = probe(src, c)
 
@@ -1394,58 +1364,106 @@ def feedback_transform(
           f"{info.width}x{info.height}")
     print(f"  transform={transform}, amount={amount}, mix={mix}")
 
-    h, w = info.height, info.width
-    cx, cy = w / 2.0, h / 2.0
+    frames = _load_frames(src, c)
+    output = _process_feedback_transform(
+        frames, info.fps, transform=transform, amount=amount, mix=mix, seed=seed,
+    )
+    return _write_frames(output, dst, info, c, "feedback_transform")
 
-    prev_out: Optional[np.ndarray] = None
-    frame_count = 0
 
-    with FrameWriter(dst, info, cfg=c) as writer:
-        t0 = _time.monotonic()
-        last_log = t0
-        for frame in read_frames(src, c):
-            f = frame.astype(np.float32)
+# ---------------------------------------------------------------------------
+# Fused time effect chain
+# ---------------------------------------------------------------------------
 
-            if prev_out is None:
-                out = f
-            else:
-                # Build affine transform matrix for the feedback
-                if transform == "zoom":
-                    s = 1.0 + amount
-                    M = cv2.getRotationMatrix2D((cx, cy), 0, s)
-                elif transform == "rotate":
-                    deg = amount * (180.0 / 3.14159265)
-                    M = cv2.getRotationMatrix2D((cx, cy), deg, 1.0)
-                elif transform == "spiral":
-                    s = 1.0 + amount
-                    deg = amount * 0.5 * (180.0 / 3.14159265)
-                    M = cv2.getRotationMatrix2D((cx, cy), deg, s)
-                else:  # "shift"
-                    M = np.float64([[1, 0, amount * w],
-                                    [0, 1, 0]])
+def _apply_time_effect(
+    frames: list[np.ndarray],
+    step,
+    fps: float,
+    seed: Optional[int],
+) -> list[np.ndarray]:
+    """Dispatch a recipe step dataclass to the corresponding _process_* helper."""
+    # Local imports to avoid circular dependency (recipe.py doesn't import time.py)
+    from ..recipe import (
+        ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
+        SlitScanStep, TemporalTileStep, QuadLoopStep,
+        SmearStep, BloomStep, StackStep, SlipStep,
+        FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
+    )
+    match step:
+        case ScrubStep(smoothness=smoothness, intensity=intensity):
+            return _process_scrub(frames, fps, smoothness=smoothness, intensity=intensity, seed=seed)
+        case DriftStep(loop_dur=loop_dur, drift=drift):
+            return _process_drift(frames, fps, loop_dur=loop_dur, drift=drift, seed=seed)
+        case PingPongStep(window=window):
+            return _process_ping_pong(frames, fps, window=window, seed=seed)
+        case EchoStep(delay=delay, trail=trail):
+            return _process_echo(frames, fps, delay=delay, trail=trail)
+        case PatchStep(patch_min=patch_min, patch_max=patch_max):
+            return _process_patch(frames, fps, patch_min=patch_min, patch_max=patch_max, seed=seed)
+        case SlitScanStep(axis=axis, scan_speed=scan_speed):
+            return _process_slit_scan(frames, fps, axis=axis, scan_speed=scan_speed, seed=seed)
+        case TemporalTileStep(grid=grid, offset_scale=offset_scale):
+            return _process_temporal_tile(frames, fps, grid=grid, offset_scale=offset_scale, seed=seed)
+        case QuadLoopStep(loop_dur=loop_dur, offset_scale=offset_scale, layout=layout):
+            return _process_quad_loop(frames, fps, loop_dur=loop_dur, offset_scale=offset_scale, layout=layout, seed=seed)
+        case SmearStep(threshold=threshold):
+            return _process_smear(frames, fps, threshold=threshold)
+        case BloomStep(sensitivity=sensitivity):
+            return _process_bloom(frames, fps, sensitivity=sensitivity)
+        case StackStep(window=window, mode=mode):
+            return _process_frame_stack(frames, fps, window=window, mode=mode)
+        case SlipStep(n_bands=n_bands, max_slip=max_slip, axis=axis):
+            return _process_slip(frames, fps, n_bands=n_bands, max_slip=max_slip, axis=axis, seed=seed)
+        case FlowWarpStep(amplify=amplify, smooth=smooth):
+            return _process_flow_warp(frames, fps, amplify=amplify, smooth=smooth, seed=seed)
+        case TemporalSortStep(mode=mode, direction=direction):
+            return _process_temporal_sort(frames, fps, mode=mode, direction=direction, seed=seed)
+        case ExtremaHoldStep(mode=mode, decay=decay):
+            return _process_extrema_hold(frames, fps, mode=mode, decay=decay, seed=seed)
+        case FeedbackTransformStep(transform=xform, amount=amount, mix=mix_val):
+            return _process_feedback_transform(frames, fps, transform=xform, amount=amount, mix=mix_val, seed=seed)
+        case _:
+            raise ValueError(f"Not a time effect step: {type(step).__name__}")
 
-                # Apply spatial transform to previous output
-                warped = cv2.warpAffine(
-                    prev_out, M, (w, h),
-                    flags=cv2.INTER_LINEAR,
-                    borderMode=cv2.BORDER_REFLECT,
-                )
 
-                # Blend: current frame + transformed feedback
-                out = (1.0 - mix) * f + mix * warped
+@task(name="fused-time-chain")
+def fused_time_chain(
+    src: Path,
+    dst: Path,
+    *,
+    steps: list,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Apply multiple time effects in a single decode-process-encode pass.
 
-            prev_out = out.copy()
-            writer.write(np.clip(out, 0, 255).astype(np.uint8))
-            frame_count += 1
+    Eliminates intermediate file I/O when consecutive recipe steps are
+    all temporal effects. Mirrors _apply_filter_chain for ffmpeg filters.
 
-            now = _time.monotonic()
-            if now - last_log >= 5.0:
-                elapsed = now - t0
-                logger.info("feedback_transform: %d frames, elapsed=%.1fs",
-                            frame_count, elapsed)
-                last_log = now
+    steps: list of (step_dataclass, seed) tuples.
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+    fps = info.fps
 
-    elapsed = _time.monotonic() - t0
-    print(f"  wrote {frame_count} frames in {elapsed:.1f}s -> {dst.name}")
+    frames = _load_frames(src, c)
+    n_effects = len(steps)
+    logger.info("fused_time_chain: %d effects on %d frames (%.1fs @ %.0ffps)",
+                n_effects, len(frames), info.duration, fps)
+    print(f"fused_time_chain: {n_effects} effects on {len(frames)} frames "
+          f"({info.duration:.1f}s @ {fps:.0f}fps)")
 
-    return dst
+    t0 = _time.monotonic()
+    for i, (step, seed) in enumerate(steps):
+        step_name = type(step).__name__.replace("Step", "").lower()
+        logger.info("  [%d/%d] %s ...", i + 1, n_effects, step_name)
+        step_t0 = _time.monotonic()
+
+        frames = _apply_time_effect(frames, step, fps, seed)
+
+        step_elapsed = _time.monotonic() - step_t0
+        print(f"  [{i + 1}/{n_effects}] {step_name} done ({step_elapsed:.1f}s, {len(frames)} frames)")
+
+    total_elapsed = _time.monotonic() - t0
+    print(f"  all effects in {total_elapsed:.1f}s")
+
+    return _write_frames(frames, dst, info, c, "fused_time_chain")
