@@ -566,7 +566,7 @@ def _resolve_shaders_for_step(
 ) -> tuple[list[Path], dict[str, dict[str, float]]]:
     """Resolve shader paths + param overrides for a ShaderStep."""
     if step.shader_paths:
-        return step.shader_paths, {}
+        return step.shader_paths, step.param_overrides or {}
 
     s_dir = step.shader_dir or recipe.shader_dir or cfg.shader_dir
     key = str(s_dir)

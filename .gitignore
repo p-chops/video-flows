@@ -42,5 +42,8 @@ source/
 *.fs
 *.vs
 
+# One-off render/test scripts
+scripts/
+
 # Prefect
 .prefect/

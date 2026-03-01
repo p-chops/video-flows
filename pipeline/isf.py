@@ -219,6 +219,8 @@ def _translate_isf_to_glsl(body: str, shader: ISFShader) -> str:
     src = re.sub(r'\bTIME\b', 'u_time', src)
     # gl_FragColor → fragColor (output)
     src = src.replace("gl_FragColor", "fragColor")
+    # texture2D → texture (deprecated in #version 330)
+    src = re.sub(r'\btexture2D\b', 'texture', src)
 
     # ── Build the full #version 330 source ────────────────────────────────
 

@@ -78,6 +78,7 @@ class ShaderStep:
     n_shaders: int = 3                           # random pick count
     categories: Optional[list[str]] = None       # filter by ISF category
     shader_dir: Optional[Path] = None            # override default shader dir
+    param_overrides: Optional[dict[str, dict[str, float]]] = None  # {shader_stem: {param: val}}
 
 @dataclass
 class NormalizeStep:
@@ -499,11 +500,14 @@ def _step_to_dict(s: Step) -> dict:
             return {"type": "crush", "crush": s.crush,
                     "codec": s.codec, "downscale": s.downscale}
         case ShaderStep():
-            return {"type": "shader",
-                    "shader_paths": [str(p) for p in s.shader_paths] if s.shader_paths else None,
-                    "n_shaders": s.n_shaders,
-                    "categories": s.categories,
-                    "shader_dir": str(s.shader_dir) if s.shader_dir else None}
+            d = {"type": "shader",
+                 "shader_paths": [str(p) for p in s.shader_paths] if s.shader_paths else None,
+                 "n_shaders": s.n_shaders,
+                 "categories": s.categories,
+                 "shader_dir": str(s.shader_dir) if s.shader_dir else None}
+            if s.param_overrides:
+                d["param_overrides"] = s.param_overrides
+            return d
         case NormalizeStep():
             return {"type": "normalize", "black_point": s.black_point,
                     "white_point": s.white_point}
@@ -569,6 +573,7 @@ def _step_from_dict(d: dict) -> Step:
             n_shaders=d.get("n_shaders", 3),
             categories=d.get("categories"),
             shader_dir=Path(d["shader_dir"]) if d.get("shader_dir") else None,
+            param_overrides=d.get("param_overrides"),
         )
     elif t == "normalize":
         return NormalizeStep(black_point=d.get("black_point", 0.01),
@@ -2586,7 +2591,10 @@ def load_boutique_stacks(
 ) -> list[tuple[str, list[str], dict]]:
     """Load boutique stack definitions from YAML.
 
-    Returns list of (name, shader_names, time_effect_spec) tuples.
+    Returns list of (name, shader_names, shader_params_spec) tuples.
+    ``shader_params_spec`` maps shader stems to param dicts whose values
+    may use randomisation syntax (scalar, ``[min, max]``,
+    ``{choice: [...]}``)..
     Default path: ``boutique_stacks.yaml`` in the project root.
     """
     import yaml
@@ -2597,7 +2605,11 @@ def load_boutique_stacks(
         data = yaml.safe_load(f)
     stacks = []
     for name, spec in data["stacks"].items():
-        stacks.append((name, spec["shaders"], spec.get("time_effect", {})))
+        stacks.append((
+            name,
+            spec["shaders"],
+            spec.get("shader_params", {}),
+        ))
     return stacks
 
 
@@ -2637,18 +2649,24 @@ def _make_time_step(rng: _random_mod.Random, spec: dict) -> Step:
 # Load stacks from YAML at import time.
 _BOUTIQUE_STACKS_RAW = load_boutique_stacks()
 
-# Backward-compatible (name, shader_names) list used by _build_boutique.
-_BOUTIQUE_STACKS = [(name, shaders) for name, shaders, _ in _BOUTIQUE_STACKS_RAW]
 
+def _resolve_shader_params(
+    rng: _random_mod.Random, spec: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, float]]:
+    """Resolve shader_params YAML spec to concrete param_overrides.
 
-def _boutique_time_step(
-    rng: _random_mod.Random, name: str, complexity: float,
-) -> Step:
-    """Return the time effect paired with a boutique stack (from YAML config)."""
-    for sname, _, spec in _BOUTIQUE_STACKS_RAW:
-        if sname == name:
-            return _make_time_step(rng, spec)
-    return EchoStep()  # fallback
+    Accepts the same randomisation syntax as time effect params:
+    scalar, ``[min, max]``, ``{choice: [...]}``.  All values resolve to float.
+    """
+    if not spec:
+        return {}
+    resolved: dict[str, dict[str, float]] = {}
+    for shader_stem, params in spec.items():
+        resolved[shader_stem] = {
+            k: float(_resolve_param(rng, v))
+            for k, v in params.items()
+        }
+    return resolved
 
 
 def _build_boutique(
@@ -2666,8 +2684,8 @@ def _build_boutique(
 ) -> BrainWipeRecipe:
     """Boutique collection: hand-designed shader stacks for distinctive textures.
 
-    Each stack is a curated 3-shader combination paired with a complementary
-    time effect — designed for lively, abstract, visually rich output.
+    Each stack is a curated shader combination with randomised per-shader
+    parameters — designed for lively, abstract, visually rich output.
     One stack is chosen with equal probability.
     """
     actual_segments = _resolve_segments(rng, complexity, n_segments)
@@ -2677,15 +2695,17 @@ def _build_boutique(
     )
     seg_target = _seg_dur_target(target_dur, actual_segments, wants_transition)
 
-    # Pick a curated stack
-    name, shader_names = rng.choice(_BOUTIQUE_STACKS)
+    # Pick a curated stack (with optional shader params)
+    name, shader_names, shader_params_spec = rng.choice(_BOUTIQUE_STACKS_RAW)
     _S = Path("shaders")
     shader_paths = [_S / f"{s}.fs" for s in shader_names]
 
-    # Build the recipe: curated shaders → paired time effect → normalize
+    # Resolve randomised shader params from YAML spec
+    param_overrides = _resolve_shader_params(rng, shader_params_spec) or None
+
+    # Build the recipe: curated shaders → normalize
     steps: list[Step] = [
-        ShaderStep(shader_paths=shader_paths),
-        _boutique_time_step(rng, name, complexity),
+        ShaderStep(shader_paths=shader_paths, param_overrides=param_overrides),
         NormalizeStep(),
     ]
 
