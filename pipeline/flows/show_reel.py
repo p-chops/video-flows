@@ -38,6 +38,28 @@ from ..tasks.transition import transition_sequence
 from .brain_wipe import brain_wipe
 
 
+def _fixup_recipe_sources(recipe, dur: float, rng: random.Random) -> None:
+    """Apply source fixups to a recipe's lanes (in-place).
+
+    Shared between _plan_shows and reroll to ensure consistent behavior:
+    - Reject StaticSource → replace with GeneratorSource
+    - Force method="random" for footage (scene detection ignores dur bounds)
+    - Clamp per-segment duration to budget
+    """
+    for lane in recipe.lanes:
+        if isinstance(lane.source, StaticSource):
+            lane.source = GeneratorSource(
+                min_dur=lane.source.min_dur,
+                max_dur=lane.source.max_dur,
+                n_warps=rng.randint(0, 2),
+            )
+        if isinstance(lane.source, FootageSource):
+            lane.source.method = "random"
+        seg_budget = dur / max(lane.n_segments, 1)
+        lane.source.max_dur = min(lane.source.max_dur, seg_budget)
+        lane.source.min_dur = min(lane.source.min_dur, seg_budget)
+
+
 def _resolve_src(rng: random.Random, src: Optional[Path]) -> Optional[Path]:
     """If src is a directory, pick a random .mp4 from it. Otherwise return as-is."""
     if src is None:
@@ -158,23 +180,7 @@ def _plan_shows(
         recipe.width = width
         recipe.height = height
 
-        # Reject StaticSource in any lane — TV noise is boring. Replace
-        # with GeneratorSource. Force method="random" for footage (scene
-        # detection returns full scenes that ignore duration bounds).
-        # Clamp durations so total output ≈ dur.
-        for lane in recipe.lanes:
-            if isinstance(lane.source, StaticSource):
-                lane.source = GeneratorSource(
-                    min_dur=lane.source.min_dur,
-                    max_dur=lane.source.max_dur,
-                    n_warps=rng.randint(0, 2),
-                )
-            if isinstance(lane.source, FootageSource):
-                lane.source.method = "random"
-            # Per-segment budget: total target / segment count
-            seg_budget = dur / max(lane.n_segments, 1)
-            lane.source.max_dur = min(lane.source.max_dur, seg_budget)
-            lane.source.min_dur = min(lane.source.min_dur, seg_budget)
+        _fixup_recipe_sources(recipe, dur, rng)
 
         kind = "footage" if use_footage else "generator"
         src_tag = f" [{show_src.name}]" if (use_footage and is_src_dir and show_src) else ""
@@ -220,13 +226,24 @@ def show_reel_render(
     output: Optional[Path] = None,
     cfg: Optional[Config] = None,
     cleanup: bool = True,
+    motion_floor: float = 0.005,
+    max_reroll: int = 2,
 ) -> Path:
-    """Render a show reel from a manifest dict (or loaded JSON)."""
+    """Render a show reel from a manifest dict (or loaded JSON).
+
+    motion_floor: minimum motion score (0–1). Shows below this are
+                  considered stasis and rerolled with a new seed.
+                  0.0 disables the check.
+    max_reroll:   max reroll attempts per show before accepting.
+    """
     c = cfg or Config()
     c.ensure_dirs()
 
     reel_seed = manifest["seed"]
     transition_dur = manifest["transition_dur"]
+    width = manifest.get("width", 1280)
+    height = manifest.get("height", 720)
+    archetype_hint = manifest.get("archetype")
     shows = manifest["shows"]
     out = output or Path(manifest["output"])
 
@@ -237,22 +254,22 @@ def show_reel_render(
     rng = random.Random(reel_seed)
 
     print(f"═══ Rendering Show Reel (seed={reel_seed}, {len(shows)} shows) ═══")
+    if motion_floor > 0:
+        print(f"    stasis detection: motion_floor={motion_floor}, max_reroll={max_reroll}")
 
-    def _render_show(show: dict) -> Path:
+    def _render_show(show: dict, attempt: int = 0) -> Path:
         idx = show["index"]
         recipe = recipe_from_dict(show["recipe"])
         show_tag = hash_recipe(recipe)
         show_path = work / f"show_{idx:03d}_{show_tag}.mp4"
 
-        print(f"\n  rendering show {idx:03d} "
+        attempt_msg = f" (attempt {attempt + 1})" if attempt > 0 else ""
+        print(f"\n  rendering show {idx:03d}{attempt_msg} "
               f"(seed={show['seed']}, {show['kind']}, "
               f"complexity={show['complexity']:.2f}, {show['duration']:.1f}s)...")
         result = brain_wipe(recipe, output=show_path, cfg=c, cleanup=True)
 
         # Brightness floor — stretch dark shows so the reel stays watchable.
-        # ffmpeg normalize filter: actual min→0, actual max→255.
-        # independence=0 links channels (preserves hue), smoothing=10
-        # avoids per-frame flicker.
         from ..tasks.color import _probe_brightness
         avg = _probe_brightness(result, c)
         if avg < 0.15:
@@ -270,6 +287,53 @@ def show_reel_render(
             lifted.rename(result)
             result = show_path
             print(f"    brightness floor: avg={avg:.2f} → normalized")
+
+        # Motion floor — detect stasis and reroll with a new seed.
+        if motion_floor > 0 and attempt < max_reroll:
+            from ..tasks.color import _probe_motion
+            motion = _probe_motion(result, c)
+            if motion < motion_floor:
+                new_seed = show["seed"] + attempt + 1
+                print(f"    stasis detected (motion={motion:.4f}), "
+                      f"rerolling show {idx:03d} with seed={new_seed}...")
+
+                # Clean up the stasis clip
+                if result.exists():
+                    result.unlink()
+
+                # Reconstruct source path for recipe generation
+                show_src = None
+                if show["kind"] == "footage":
+                    lanes = show["recipe"].get("lanes", [])
+                    if lanes:
+                        src_dict = lanes[0].get("source", {})
+                        src_path = src_dict.get("src")
+                        if src_path:
+                            show_src = Path(src_path)
+
+                reroll_rng = random.Random(new_seed)
+                new_recipe = random_recipe(
+                    src=show_src,
+                    complexity=show["complexity"],
+                    target_dur=show["duration"],
+                    use_generators=(show["kind"] != "footage"),
+                    n_segments=1,
+                    use_transitions=False,
+                    seed=new_seed,
+                    archetype=archetype_hint,
+                )
+                new_recipe.width = width
+                new_recipe.height = height
+                _fixup_recipe_sources(new_recipe, show["duration"], reroll_rng)
+
+                new_show = dict(
+                    show,
+                    seed=new_seed,
+                    recipe=recipe_to_dict(new_recipe),
+                )
+                return _render_show(new_show, attempt=attempt + 1)
+            else:
+                print(f"    motion check: {motion:.4f} (ok)")
 
         return result
 
@@ -338,6 +402,8 @@ def show_reel(
     archetype: Optional[str] = None,
     output: Optional[Path] = None,
     cleanup: bool = True,
+    motion_floor: float = 0.005,
+    max_reroll: int = 2,
     cfg: Optional[Config] = None,
 ) -> Path:
     """
@@ -353,6 +419,8 @@ def show_reel(
     footage_ratio:  probability each show uses footage vs generator (0.0–1.0)
     cleanup:        remove intermediate show clips after joining (default True)
     archetype:      force all shows to use this archetype (e.g. "deep_time")
+    motion_floor:   stasis detection threshold (0.0 disables)
+    max_reroll:     max reroll attempts per stasis show
     """
     c = cfg or Config()
     manifest = _plan_shows(
@@ -362,11 +430,17 @@ def show_reel(
         src=src, footage_ratio=footage_ratio, seed=seed,
         archetype=archetype, output=output, cfg=c,
     )
+    # Stash archetype in manifest so reroll can use it
+    if archetype:
+        manifest["archetype"] = archetype
     # Save manifest alongside the run for reproducibility
     manifest_path = c.work_dir / f"reel_{seed}_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str) + "\n")
     print(f"  manifest saved: {manifest_path}")
-    return show_reel_render(manifest, cfg=c, cleanup=cleanup)
+    return show_reel_render(
+        manifest, cfg=c, cleanup=cleanup,
+        motion_floor=motion_floor, max_reroll=max_reroll,
+    )
 
 
 # ── Batch flow ───────────────────────────────────────────────────────────────
@@ -388,6 +462,8 @@ def show_reel_batch(
     seed: Optional[int] = None,
     archetype: Optional[str] = None,
     cleanup: bool = True,
+    motion_floor: float = 0.005,
+    max_reroll: int = 2,
     cfg: Optional[Config] = None,
 ) -> list[Path]:
     """Generate multiple random show reels for curation.
@@ -418,7 +494,10 @@ def show_reel_batch(
             src=src, footage_ratio=footage_ratio, seed=reel_seed,
             archetype=archetype, output=out_path, cfg=c,
         )
-        result = show_reel_render(manifest, cfg=c, cleanup=cleanup)
+        result = show_reel_render(
+            manifest, cfg=c, cleanup=cleanup,
+            motion_floor=motion_floor, max_reroll=max_reroll,
+        )
         results.append(result)
         print(f"  ✓ reel {i+1}/{n_reels} done: {result.name}\n")
 
@@ -459,6 +538,10 @@ def _add_plan_args(parser):
     parser.add_argument("-o", "--output", type=str, default=None)
     parser.add_argument("--no-cleanup", action="store_true",
                         help="Retain intermediate show clips in work dir")
+    parser.add_argument("--motion-floor", type=float, default=0.005,
+                        help="Stasis detection threshold (0.0 disables)")
+    parser.add_argument("--max-reroll", type=int, default=2,
+                        help="Max reroll attempts per stasis show")
 
 
 def main():
@@ -487,6 +570,10 @@ def main():
                           help="Override output path from manifest")
     p_render.add_argument("--no-cleanup", action="store_true",
                           help="Retain intermediate show clips in work dir")
+    p_render.add_argument("--motion-floor", type=float, default=0.005,
+                          help="Stasis detection threshold (0.0 disables)")
+    p_render.add_argument("--max-reroll", type=int, default=2,
+                          help="Max reroll attempts per stasis show")
 
     # run — one-shot plan + render (original behaviour)
     p_run = sub.add_parser("run", help="Plan and render in one shot (default)")
@@ -530,7 +617,10 @@ def main():
     elif args.command == "render":
         manifest = json.loads(Path(args.manifest).read_text())
         out = Path(args.output) if args.output else None
-        show_reel_render(manifest, output=out, cleanup=not args.no_cleanup)
+        show_reel_render(
+            manifest, output=out, cleanup=not args.no_cleanup,
+            motion_floor=args.motion_floor, max_reroll=args.max_reroll,
+        )
 
     elif args.command == "run":
         out = Path(args.output) if args.output else None
@@ -551,6 +641,8 @@ def main():
             archetype=args.archetype,
             output=out,
             cleanup=not args.no_cleanup,
+            motion_floor=args.motion_floor,
+            max_reroll=args.max_reroll,
         )
 
     elif args.command == "batch":
@@ -571,6 +663,8 @@ def main():
             seed=args.seed,
             archetype=args.archetype,
             cleanup=not args.no_cleanup,
+            motion_floor=args.motion_floor,
+            max_reroll=args.max_reroll,
         )
 
 

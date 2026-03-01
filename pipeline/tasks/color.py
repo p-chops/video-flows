@@ -78,6 +78,31 @@ def _probe_brightness(src: Path, cfg: Config, n_samples: int = 10) -> float:
     return total / max(count, 1)
 
 
+def _probe_motion(src: Path, cfg: Config, n_samples: int = 10) -> float:
+    """Sample frame pairs and return average motion in [0, 1].
+
+    0.0 = completely static, 1.0 = maximum change between frames.
+    Uses mean absolute difference of consecutive sampled frames.
+    """
+    info = probe(src, cfg)
+    total_frames = int(info.duration * info.fps)
+    sample_interval = max(1, total_frames // n_samples)
+
+    prev = None
+    total = 0.0
+    count = 0
+    for i, frame in enumerate(read_frames(src, cfg=cfg)):
+        if i % sample_interval == 0:
+            if prev is not None:
+                diff = np.mean(np.abs(
+                    frame.astype(np.int16) - prev.astype(np.int16)
+                )) / 255.0
+                total += diff
+                count += 1
+            prev = frame
+    return total / max(count, 1)
+
+
 @task(name="auto-levels")
 def auto_levels(
     src: Path,

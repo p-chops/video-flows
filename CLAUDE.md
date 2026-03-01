@@ -112,10 +112,12 @@ Blend modes use ffmpeg filter names mapped via `FFMPEG_BLEND_MODES` dict. Adding
 
 ## Color Tasks
 
-`pipeline/tasks/color.py` provides two tasks:
+`pipeline/tasks/color.py` provides two tasks and two probe utilities:
 
 - **`normalize_levels`** — percentile-based level stretch via ffmpeg's `colorlevels` filter. Clips the darkest/brightest percentiles and stretches remaining range to 0–255. Static per-pixel LUT with negligible overhead.
 - **`auto_levels`** — probe average brightness via frame sampling, compute gamma correction toward a target (default 0.45), apply via ffmpeg `eq=gamma=X`. Skips encode if no correction needed. Useful for individual clips but not ideal for show reels (tends to flatten character).
+- **`_probe_brightness(src, cfg)`** — sample N evenly-spaced frames, return average brightness in [0, 1]. Used by show reel brightness floor (< 0.15 triggers normalization).
+- **`_probe_motion(src, cfg)`** — sample N evenly-spaced consecutive frame pairs, return average mean absolute difference in [0, 1]. 0.0 = completely static. Used by show reel stasis detection (< motion_floor triggers reroll).
 
 ## Transition Tasks
 
@@ -342,6 +344,8 @@ python -m pipeline.flows.show_reel render output/show_reel_777_manifest.json
 ```
 
 Key parameters: `n_shows` (number of segments), `reel_dur` (target reel duration in seconds — auto-calculates `n_shows` from avg show duration), `min_dur`/`max_dur` (per-show duration range), `min_complexity`/`max_complexity` (complexity range per show), `transition_dur`, `width`/`height`, `src` (optional source footage or directory), `footage_ratio` (0.0–1.0, default 0.4), `archetype` (force all shows to use a specific archetype), `seed`. When both `n_shows` and `reel_dur` are omitted, defaults to 20 shows.
+
+**Stasis detection + automatic reroll**: After rendering each show, `_probe_motion()` measures frame-to-frame motion. If below `motion_floor` (default 0.005), the show is discarded and re-rendered with a new seed (new recipe, same complexity/duration/kind). Up to `max_reroll` attempts (default 2). CLI: `--motion-floor 0.01 --max-reroll 3`. Set `--motion-floor 0` to disable. Typical motion scores: 0.05–0.25 for healthy shows. The brightness floor (< 0.15 avg → normalize) runs before the motion check.
 
 Note: connect to persistent Prefect server via `PREFECT_API_URL=http://127.0.0.1:4200/api` for UI visibility. Without it, flows start ephemeral servers.
 
