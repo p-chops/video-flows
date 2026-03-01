@@ -1544,8 +1544,7 @@ def _random_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
         ]
     cls = _weighted_choice(rng, pool)
     if cls is ShaderStep:
-        max_shaders = max(1, int(1 + complexity * 3))  # 0→1, 0.5→2, 1.0→4
-        return ShaderStep(n_shaders=rng.randint(1, max_shaders))
+        return _shader_step(rng, complexity)
     elif cls is CrushStep:
         return CrushStep(
             crush=rng.uniform(0.5, 1.0),
@@ -1636,17 +1635,15 @@ def _random_steps(rng: _random_mod.Random, n_steps: int, complexity: float = 0.5
         if isinstance(s, _TIME_STEPS):
             time_count += 1
             if time_count > 2:
-                max_sh = max(1, int(1 + complexity * 3))
-                filtered.append(ShaderStep(n_shaders=rng.randint(1, max_sh)))
+                filtered.append(_shader_step(rng, complexity))
                 continue
         filtered.append(s)
     steps = filtered
 
     # Guarantee at least 1 shader step
     if not any(isinstance(s, ShaderStep) for s in steps):
-        max_sh = max(1, int(1 + complexity * 3))
         pos = rng.randint(0, max(0, len(steps) - 1))
-        steps.insert(pos, ShaderStep(n_shaders=rng.randint(1, max_sh)))
+        steps.insert(pos, _shader_step(rng, complexity))
 
     return steps
 
@@ -1949,12 +1946,13 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
         )
 
 
-def _shader_step(rng: _random_mod.Random, complexity: float, n: Optional[int] = None) -> ShaderStep:
-    """ShaderStep with complexity-scaled n_shaders."""
-    if n is not None:
-        return ShaderStep(n_shaders=n)
-    max_sh = max(1, int(1 + complexity * 3))
-    return ShaderStep(n_shaders=rng.randint(1, max_sh))
+def _shader_step(rng: _random_mod.Random, complexity: float = 0.5, n: Optional[int] = None) -> ShaderStep:
+    """Pick a random boutique shader stack with resolved params."""
+    name, shader_names, shader_params_spec = rng.choice(_BOUTIQUE_STACKS_RAW)
+    _S = Path("shaders")
+    shader_paths = [_S / f"{s}.fs" for s in shader_names]
+    param_overrides = _resolve_shader_params(rng, shader_params_spec) or None
+    return ShaderStep(shader_paths=shader_paths, param_overrides=param_overrides)
 
 
 # ─── Archetype builders ─────────────────────────────────────────────────────
@@ -2404,8 +2402,12 @@ def _build_stutter(
     # Many short segments — the structure IS the effect
     actual_segments = n_segments or max(4, int(4 + complexity * 8))
 
-    # Short per-segment durations (0.5–2s each)
-    seg_dur = rng.uniform(0.5, 1.0 + complexity * 1.0)
+    # Short per-segment durations — derive from target_dur if given
+    if target_dur is not None:
+        seg_dur = target_dur / max(actual_segments, 1)
+        seg_dur = max(0.5, seg_dur)  # floor at 0.5s
+    else:
+        seg_dur = rng.uniform(0.5, 1.0 + complexity * 1.0)
 
     # Light processing per segment — let the cuts do the work
     n_st = n_steps or max(1, int(1 + complexity * 2))

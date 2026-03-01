@@ -30,7 +30,7 @@ from prefect.task_runners import ConcurrentTaskRunner
 from ..config import Config
 from ..recipe import (
     random_recipe, hash_recipe, recipe_to_dict, recipe_from_dict,
-    GeneratorSource, StaticSource,
+    FootageSource, GeneratorSource, StaticSource,
 )
 from ..tasks.transition import transition_sequence
 from .brain_wipe import brain_wipe
@@ -155,7 +155,9 @@ def _plan_shows(
         recipe.height = height
 
         # Reject StaticSource in any lane — TV noise is boring. Replace
-        # with GeneratorSource. Also clamp durations to the show's target.
+        # with GeneratorSource. Force method="random" for footage (scene
+        # detection returns full scenes that ignore duration bounds).
+        # Clamp durations so total output ≈ dur.
         for lane in recipe.lanes:
             if isinstance(lane.source, StaticSource):
                 lane.source = GeneratorSource(
@@ -163,8 +165,12 @@ def _plan_shows(
                     max_dur=lane.source.max_dur,
                     n_warps=rng.randint(0, 2),
                 )
-            lane.source.max_dur = min(lane.source.max_dur, dur)
-            lane.source.min_dur = min(lane.source.min_dur, dur)
+            if isinstance(lane.source, FootageSource):
+                lane.source.method = "random"
+            # Per-segment budget: total target / segment count
+            seg_budget = dur / max(lane.n_segments, 1)
+            lane.source.max_dur = min(lane.source.max_dur, seg_budget)
+            lane.source.min_dur = min(lane.source.min_dur, seg_budget)
 
         kind = "footage" if use_footage else "generator"
         src_tag = f" [{show_src.name}]" if (use_footage and is_src_dir and show_src) else ""
