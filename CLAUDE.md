@@ -145,7 +145,7 @@ Blend modes use ffmpeg filter names mapped via `FFMPEG_BLEND_MODES` dict. Adding
 
 ## Time Effects
 
-`pipeline/tasks/time.py` — temporal manipulation effects. Flows + CLI in `pipeline/flows/time_lab.py`. All effects: same duration in, same duration out.
+`pipeline/tasks/time.py` — temporal manipulation effects. Flows + CLI in `pipeline/flows/time_lab.py`. All effects: same duration in, same duration out. Each effect has a `_process_*` helper (pure function on `list[np.ndarray]`) and a thin `@task` wrapper for standalone use.
 
 | Effect | Task | Key params | Memory model |
 |--------|------|-----------|--------------|
@@ -164,6 +164,10 @@ Blend modes use ffmpeg filter names mapped via `FFMPEG_BLEND_MODES` dict. Adding
 | temporal_sort | `temporal_sort` | `mode`, `direction`, `seed` | All frames in RAM (3D volume) |
 | extrema_hold | `extrema_hold` | `mode`, `decay`, `seed` | Streaming (float32 canvas) |
 | feedback_transform | `feedback_transform` | `transform`, `amount`, `mix`, `seed` | Streaming (prev output) |
+
+**Removed from random recipe pool** (still available for manual use): `extrema_hold` (drives to black/white), `smear` (stasis amplifier), `bloom` (stasis amplifier), `patch` (stasis amplifier).
+
+**Fused time chain**: `fused_time_chain` task applies multiple time effects in a single decode→process→encode pass. See "Filter Chain Merging" section.
 
 ### Transform Tasks
 
@@ -197,7 +201,9 @@ A `BrainWipeRecipe` describes: **lanes** (parallel processing streams), **compos
 - `generator_render_recipe()` — generator shaders + warp chains, no source needed
 - `composite_recipe(src)` — two lanes composited via mask
 - `temporal_sandwich_recipe(src)` — scrub → shaders → echo → shaders → patch (time as the crusher)
-- `deep_time_recipe(src)` — drift → pingpong → echo → scrub → shader (recursive temporal folding)
+- `deep_time_recipe(src)` — drift → pingpong → echo → scrub (recursive temporal folding)
+- `time_cascade_recipe(src)` — multi-scale temporal cascade: echo → feedback → drift → pingpong → scrub → slit_scan
+- `temporal_geology_recipe(src)` — alternating time-shader strata: drift+smear → shader → echo+tile → shader → extrema+slip
 - `hybrid_composite_recipe(src)` — footage + generator lanes, motion mask composite
 - `codec_spectrum_recipe(src)` — mpeg2 → mpeg4 → x264 multi-codec crush cascade
 - `breathing_wall_recipe(src)` — 3 lanes at different ping-pong rates, screen-blended polyrhythm
@@ -217,7 +223,7 @@ A `BrainWipeRecipe` describes: **lanes** (parallel processing streams), **compos
 | Archetype | Structure |
 |-----------|-----------|
 | `crush_sandwich` | Alternating crush/shader pairs (C-S-C-S), optional codec cascade |
-| `deep_time` | 3–5 stacked time effects + 1 boutique shader stack (temporal destruction) |
+| `deep_time` | 5–8 stacked time effects, no shaders (pure temporal destruction) |
 | `temporal_sandwich` | Alternating time/boutique shader pairs (T-S-T-S) |
 | `escalation` | Progressive parameter increase (within-lane crush/downscale, or cross-lane intensity) |
 | `polyrhythm` | 2–4 lanes at harmonically-related temporal rates, brightness-neutral blend |
@@ -312,7 +318,7 @@ python -m pipeline.flows.stooges input/footage.mp4 \
 
 `pipeline/flows/show_reel.py` — channel-surfing through heterogeneous "shows". Each show is a short (5–18s) clip rendered at a random complexity level via `random_recipe` + `brain_wipe` subflow, so some are raw warped generators and others have crush, shaders, time effects, etc. Shows are joined with random per-pair transitions. **Output is consistently usable for stream content as of 2026-02-28.**
 
-Supports optional source footage — when `--src` is provided, each show independently flips a coin at `--footage-ratio` probability to decide whether it uses footage or a generator. `--src input/` (directory) picks random .mp4 files per show.
+Supports optional source footage — when `--src` is provided, each show independently flips a coin at `--footage-ratio` probability to decide whether it uses footage or a generator. `--footage-ratio 1.0` guarantees all-footage (no generator fallback). `--src input/` (directory) picks random .mp4 files per show.
 
 ```
 # Generator-only reel
@@ -320,6 +326,9 @@ python -m pipeline.flows.show_reel run -n 15 --min-dur 10 --max-dur 15 --seed 77
 
 # Mixed footage + generator reel (70% footage, random files from directory)
 python -m pipeline.flows.show_reel run -n 9 --src input/ --footage-ratio 0.7 --seed 42
+
+# Force a specific archetype for all shows
+python -m pipeline.flows.show_reel run -n 8 --src input/footage.mp4 --footage-ratio 1.0 --archetype deep_time --seed 42
 
 # Batch: 9 reels at once
 python -m pipeline.flows.show_reel batch 9 -n 9 --seed 8400 --src input/ --footage-ratio 0.7 --min-complexity 0.3 --max-complexity 0.9 --min-dur 10 --max-dur 18
@@ -332,7 +341,7 @@ python -m pipeline.flows.show_reel plan -n 8 --seed 777 --src input/footage.mp4
 python -m pipeline.flows.show_reel render output/show_reel_777_manifest.json
 ```
 
-Key parameters: `n_shows` (number of segments), `reel_dur` (target reel duration in seconds — auto-calculates `n_shows` from avg show duration), `min_dur`/`max_dur` (per-show duration range), `min_complexity`/`max_complexity` (complexity range per show), `transition_dur`, `width`/`height`, `src` (optional source footage or directory), `footage_ratio` (0.0–1.0, default 0.4), `seed`. When both `n_shows` and `reel_dur` are omitted, defaults to 20 shows.
+Key parameters: `n_shows` (number of segments), `reel_dur` (target reel duration in seconds — auto-calculates `n_shows` from avg show duration), `min_dur`/`max_dur` (per-show duration range), `min_complexity`/`max_complexity` (complexity range per show), `transition_dur`, `width`/`height`, `src` (optional source footage or directory), `footage_ratio` (0.0–1.0, default 0.4), `archetype` (force all shows to use a specific archetype), `seed`. When both `n_shows` and `reel_dur` are omitted, defaults to 20 shows.
 
 Note: connect to persistent Prefect server via `PREFECT_API_URL=http://127.0.0.1:4200/api` for UI visibility. Without it, flows start ephemeral servers.
 
@@ -383,13 +392,21 @@ Shaders declare categories in their ISF `CATEGORIES` header array. The `filter_s
 
 ## Filter Chain Merging
 
-When processing recipes, consecutive pure-ffmpeg steps are merged into a single `-vf "filter1,filter2,..."` command, eliminating intermediate encode/decode cycles. Implemented in `brain_wipe.py` via `_group_steps()` and `_apply_filter_chain` task.
+When processing recipes, consecutive steps of the same kind are fused to eliminate intermediate encode/decode cycles. Implemented in `brain_wipe.py` via `_group_steps()` which recognizes three categories:
 
-**Mergeable step types** (pure ffmpeg `-vf` filters): `MirrorStep`, `ZoomStep`, `InvertStep`, `HueShiftStep`, `SaturateStep`, `NormalizeStep`.
+**1. FFmpeg filter chain** — consecutive pure-ffmpeg steps merged into a single `-vf "filter1,filter2,..."` command via `_apply_filter_chain` task.
+- Mergeable types: `MirrorStep`, `ZoomStep`, `InvertStep`, `HueShiftStep`, `SaturateStep`, `NormalizeStep`.
 
-**Non-mergeable** (break the chain): `CrushStep` (two-pass codec abuse), `ShaderStep` (GPU rendering), all time effects (frame-level Python with temporal state).
+**2. Fused time effect chain** — consecutive time effect steps processed on a single in-memory frame buffer via `fused_time_chain` task. One decode, N effects, one encode.
+- Fuseable types: all time step types (`ScrubStep`, `DriftStep`, `PingPongStep`, `EchoStep`, `PatchStep`, `SlitScanStep`, `TemporalTileStep`, `QuadLoopStep`, `SmearStep`, `BloomStep`, `StackStep`, `SlipStep`, `FlowWarpStep`, `TemporalSortStep`, `ExtremaHoldStep`, `FeedbackTransformStep`).
+- Each effect has a `_process_*` helper that operates on `list[np.ndarray]` — no file I/O. The `@task` wrappers are thin I/O shells.
+- `_apply_time_effect()` dispatches step dataclasses to helpers via `match`/`case`.
+- Seed consumption matches `_submit_step` exactly: seedless steps (`EchoStep`, `SmearStep`, `BloomStep`, `StackStep`) get `None`.
+- Deep time recipes (5–8 stacked time effects) benefit most — ~5x fewer encode/decode cycles.
 
-Single mergeable steps still go through `_submit_step()` — merging only activates for runs of 2+.
+**3. Singleton** — everything else (`CrushStep`, `ShaderStep`) processed individually via `_submit_step()`.
+
+Single-step groups still go through `_submit_step()` — merging/fusing only activates for runs of 2+.
 
 ## GPU Encoding (VideoToolbox)
 
