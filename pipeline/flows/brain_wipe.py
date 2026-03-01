@@ -1421,7 +1421,7 @@ def _cli():
                        "temporal-sandwich", "deep-time", "hybrid-composite",
                        "codec-spectrum", "breathing-wall", "erosion",
                        "palimpsest", "generator-stooges", "gradient-dissolve",
-                       "accretion",
+                       "accretion", "time-cascade", "temporal-geology",
                    ],
                    help="Recipe preset (default: crush-sandwich)")
     p.add_argument("-n", "--n-segments", type=int, default=8)
@@ -1498,6 +1498,8 @@ def _cli():
             generator_stooges_recipe,
             gradient_dissolve_recipe,
             accretion_recipe,
+            time_cascade_recipe,
+            temporal_geology_recipe,
         )
 
         preset = args.preset
@@ -1621,6 +1623,18 @@ def _cli():
             )
         elif preset == "accretion":
             r = accretion_recipe(
+                args.src,
+                n_segments=args.n_segments,
+                seed=args.seed,
+            )
+        elif preset == "time-cascade":
+            r = time_cascade_recipe(
+                args.src,
+                n_segments=args.n_segments,
+                seed=args.seed,
+            )
+        elif preset == "temporal-geology":
+            r = temporal_geology_recipe(
                 args.src,
                 n_segments=args.n_segments,
                 seed=args.seed,

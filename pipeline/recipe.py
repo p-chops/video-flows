@@ -1036,6 +1036,71 @@ def deep_time_recipe(
     )
 
 
+def time_cascade_recipe(
+    src: Path,
+    *,
+    n_segments: int = 6,
+    seed: Optional[int] = None,
+) -> BrainWipeRecipe:
+    """Multi-scale temporal cascade: micro echo → drift → scrub → slit scan.
+
+    Each time effect operates at a different temporal scale, from
+    sub-frame echo through second-scale drift to slow slit scan.
+    Boutique shader between the fast and slow halves.
+    """
+    return BrainWipeRecipe(
+        lanes=[Lane(
+            source=FootageSource(src),
+            n_segments=n_segments,
+            recipe=[
+                EchoStep(delay=0.0, trail=0.95),          # micro: motion blur
+                FeedbackTransformStep(transform="zoom", amount=0.01, mix=0.4),
+                ShaderStep(n_shaders=1),                   # shader between fast/slow
+                DriftStep(loop_dur=1.5),                   # second-scale loop
+                PingPongStep(window=0.6),                  # breathing rhythm
+                ScrubStep(intensity=0.8, smoothness=1.0),  # stutter navigation
+                SlitScanStep(axis="horizontal", scan_speed=0.5),  # slow spatial-temporal
+                NormalizeStep(),
+            ],
+            sequencing="shuffle",
+        )],
+        seed=seed,
+    )
+
+
+def temporal_geology_recipe(
+    src: Path,
+    *,
+    n_segments: int = 6,
+    seed: Optional[int] = None,
+) -> BrainWipeRecipe:
+    """Geological strata of time effects separated by shader processing.
+
+    Alternating time-shader-time layers, like sedimentary deposits.
+    Each shader layer bakes the temporal distortion before the next
+    time effect acts on it.
+    """
+    return BrainWipeRecipe(
+        lanes=[Lane(
+            source=FootageSource(src),
+            n_segments=n_segments,
+            recipe=[
+                DriftStep(loop_dur=2.0),
+                SmearStep(threshold=0.08),
+                ShaderStep(n_shaders=1),                   # bake first stratum
+                EchoStep(delay=0.05, trail=0.85),
+                TemporalTileStep(grid=4, offset_scale=0.6),
+                ShaderStep(n_shaders=1),                   # bake second stratum
+                ExtremaHoldStep(mode="max", decay=0.03),
+                SlipStep(n_bands=6, max_slip=0.4),
+                NormalizeStep(),
+            ],
+            sequencing="shuffle",
+        )],
+        seed=seed,
+    )
+
+
 def hybrid_composite_recipe(
     src: Path,
     *,
@@ -2052,36 +2117,18 @@ def _build_deep_time(
     target_dur: Optional[float],
     seed: Optional[int],
 ) -> BrainWipeRecipe:
-    """3–5 stacked time effects, 1 shader, normalize. Temporal destruction."""
+    """5–8 stacked time effects, 1 shader, normalize. Temporal destruction."""
     actual_segments = _resolve_segments(rng, complexity, n_segments)
     wants_transition = use_transitions if use_transitions is not None else (
         rng.random() < 0.2 + 0.6 * complexity
     )
     seg_target = _seg_dur_target(target_dur, actual_segments, wants_transition)
 
-    n_time = n_steps or max(3, int(3 + complexity * 2))
-    n_time = min(n_time, 5)
-    all_time = [ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep]
-    rng.shuffle(all_time)
-    selected = all_time[:n_time]
-
+    n_time = n_steps or max(5, int(5 + complexity * 3))
+    n_time = min(n_time, 8)
     steps: list[Step] = []
-    for cls in selected:
-        if cls is ScrubStep:
-            steps.append(ScrubStep(
-                smoothness=rng.uniform(0.5, 2.0 + complexity * 2.0),
-                intensity=rng.uniform(0.4 + complexity * 0.3, 0.7 + complexity * 0.3),
-            ))
-        elif cls is DriftStep:
-            steps.append(DriftStep(loop_dur=rng.uniform(0.3 + complexity * 0.5, 1.0 + complexity * 1.5)))
-        elif cls is PingPongStep:
-            steps.append(PingPongStep(window=rng.uniform(0.3, 0.5 + complexity * 0.8)))
-        elif cls is EchoStep:
-            delay = 0.0 if rng.random() < 0.5 else rng.uniform(0.02, 0.15)
-            steps.append(EchoStep(delay=delay, trail=rng.uniform(0.7 + complexity * 0.1, 0.95)))
-        else:  # PatchStep
-            mn = rng.uniform(0.03, 0.1)
-            steps.append(PatchStep(patch_min=mn, patch_max=rng.uniform(mn + 0.1, 0.4)))
+    for _ in range(n_time):
+        steps.append(_random_time_step(rng, complexity))
     steps.append(_shader_step(rng, complexity, n=1))
 
     source = _random_source(rng, src, use_generators, complexity)
