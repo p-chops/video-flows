@@ -692,6 +692,81 @@ def _make_pixelate_blender(max_block: int = 64):
     return blend
 
 
+def _make_melt_blender(seed: Optional[int]):
+    """Factory for melt transition. A's pixels drip downward revealing B."""
+    def blend(tail, head, n, h, w):
+        rng = np.random.default_rng(seed)
+        # Per-column random speed factor (some columns melt faster)
+        col_speed = rng.uniform(0.5, 1.5, size=w).astype(np.float32)
+        for i in range(n):
+            t = (i + 1) / (n + 1)
+            out = head[i].copy()
+            for x in range(w):
+                # How far this column has dripped (in pixels)
+                drip = int(t * col_speed[x] * h)
+                drip = min(drip, h)
+                if drip < h:
+                    # Shift A's column downward by drip pixels
+                    out[drip:, x] = tail[i][:h - drip, x]
+            yield out
+    return blend
+
+
+def _make_interlace_blender(band_height: int = 8):
+    """Factory for interlace transition. Alternating bands shift from A to B."""
+    def blend(tail, head, n, h, w):
+        # Pre-compute which band each row belongs to (even or odd)
+        row_band = np.arange(h) // band_height
+        even_mask = (row_band % 2 == 0)  # shape (h,)
+        for i in range(n):
+            t = (i + 1) / (n + 1)
+            out = np.empty((h, w, 3), dtype=np.uint8)
+            # Even bands: B grows from bottom of band upward
+            # Odd bands: B grows from top of band downward (staggered)
+            b_fill = int(t * band_height)
+            for band_idx in range(row_band[-1] + 1):
+                y0 = band_idx * band_height
+                y1 = min(y0 + band_height, h)
+                if band_idx % 2 == 0:
+                    # B fills from bottom of this band
+                    split = max(y0, y1 - b_fill)
+                    out[y0:split] = tail[i][y0:split]
+                    out[split:y1] = head[i][split:y1]
+                else:
+                    # B fills from top of this band
+                    split = min(y1, y0 + b_fill)
+                    out[y0:split] = head[i][y0:split]
+                    out[split:y1] = tail[i][split:y1]
+            yield out
+    return blend
+
+
+def _make_squeeze_blender(axis: str = "horizontal"):
+    """Factory for squeeze transition. A squeezes inward, B expands from edges."""
+    def blend(tail, head, n, h, w):
+        for i in range(n):
+            t = (i + 1) / (n + 1)
+            out = np.empty((h, w, 3), dtype=np.uint8)
+            if axis == "horizontal":
+                # A squeezes toward center, B visible on edges
+                a_width = max(1, int(w * (1.0 - t)))
+                a_x0 = (w - a_width) // 2
+                # Squeeze A into center strip
+                squeezed_a = cv2.resize(tail[i], (a_width, h), interpolation=cv2.INTER_LINEAR)
+                # B fills the full frame, then A is overlaid in center
+                out[:] = head[i]
+                out[:, a_x0:a_x0 + a_width] = squeezed_a
+            else:
+                # Vertical squeeze
+                a_height = max(1, int(h * (1.0 - t)))
+                a_y0 = (h - a_height) // 2
+                squeezed_a = cv2.resize(tail[i], (w, a_height), interpolation=cv2.INTER_LINEAR)
+                out[:] = head[i]
+                out[a_y0:a_y0 + a_height, :] = squeezed_a
+            yield out
+    return blend
+
+
 def _make_zoom_blender():
     """Factory for zoom-in reveal blending. Clip B zooms from center over A."""
     def blend(tail, head, n, h, w):
@@ -787,11 +862,19 @@ def _make_blender(transition_type: str, seed: Optional[int], **kwargs):
         return _make_pixelate_blender(
             max_block=kwargs.get("max_block", 64),
         )
+    elif transition_type == "melt":
+        return _make_melt_blender(seed=seed)
+    elif transition_type == "interlace":
+        return _make_interlace_blender()
+    elif transition_type == "squeeze":
+        return _make_squeeze_blender(
+            axis=kwargs.get("axis", "horizontal"),
+        )
     else:
         raise ValueError(f"Unknown transition type for streaming: {transition_type}")
 
 
-_RANDOM_TRANSITION_TYPES = ["crossfade", "luma_wipe", "whip_pan", "static_burst", "flash", "slide", "dissolve", "zoom", "pixelate"]
+_RANDOM_TRANSITION_TYPES = ["crossfade", "luma_wipe", "whip_pan", "static_burst", "flash", "slide", "dissolve", "zoom", "pixelate", "melt", "interlace", "squeeze"]
 _WIPE_PATTERNS = [
     "horizontal", "vertical", "radial", "diagonal",
     "directional", "noise", "star",
@@ -837,6 +920,13 @@ def _make_random_blender(seed: int):
     elif t_type == "pixelate":
         max_block = int(rng.integers(32, 96))
         return _make_pixelate_blender(max_block)
+    elif t_type == "melt":
+        return _make_melt_blender(seed)
+    elif t_type == "interlace":
+        return _make_interlace_blender()
+    elif t_type == "squeeze":
+        axis = str(rng.choice(["horizontal", "vertical"]))
+        return _make_squeeze_blender(axis)
     else:  # flash
         decay = float(rng.uniform(2.0, 5.0))
         return _make_flash_blender(decay)
