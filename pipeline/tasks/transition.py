@@ -142,9 +142,8 @@ def _generate_wipe_mask(
         safe_denom = np.where(np.abs(denom) < 1e-10, 1e-10, denom)
         star_r = np.abs(numer / safe_denom)
 
-        field = np.clip(
-            norm_dist / np.maximum(star_r, 1e-10), 0, 1
-        ).astype(np.float32)
+        raw_field = norm_dist / np.maximum(star_r, 1e-10)
+        field = (raw_field / raw_field.max()).astype(np.float32)
     elif pattern == "noise":
         if noise_field is not None:
             field = noise_field
