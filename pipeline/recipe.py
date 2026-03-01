@@ -2654,20 +2654,29 @@ _BOUTIQUE_STACKS_RAW = load_boutique_stacks()
 
 def _resolve_shader_params(
     rng: _random_mod.Random, spec: dict[str, dict[str, Any]],
-) -> dict[str, dict[str, float]]:
+) -> dict[str, dict[str, Any]]:
     """Resolve shader_params YAML spec to concrete param_overrides.
 
     Accepts the same randomisation syntax as time effect params:
-    scalar, ``[min, max]``, ``{choice: [...]}``.  All values resolve to float.
+    scalar, ``[min, max]``, ``{choice: [...]}``.  Scalar values resolve
+    to float; list values (e.g. vec4 colors) are passed through as tuples.
     """
     if not spec:
         return {}
-    resolved: dict[str, dict[str, float]] = {}
+    resolved: dict[str, dict[str, Any]] = {}
     for shader_stem, params in spec.items():
-        resolved[shader_stem] = {
-            k: float(_resolve_param(rng, v))
-            for k, v in params.items()
-        }
+        out: dict[str, Any] = {}
+        for k, v in params.items():
+            val = _resolve_param(rng, v)
+            if isinstance(val, list):
+                out[k] = tuple(float(x) for x in val)
+            elif isinstance(val, int):
+                out[k] = val  # preserve int for ISF long uniforms
+            elif isinstance(val, float):
+                out[k] = val
+            else:
+                out[k] = val
+        resolved[shader_stem] = out
     return resolved
 
 

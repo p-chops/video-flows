@@ -16,7 +16,7 @@ from ..cache import FILE_VALIDATED_INPUTS
 
 from ..config import Config
 from ..ffmpeg import probe, read_frames, FrameWriter
-from ..gl import GLContext
+from ..gl import GLContext, FBOSlot
 from ..isf import ISFShader, parse_isf, load_shader_dir
 
 
@@ -68,16 +68,23 @@ def _apply_shader_stack(
         params = shader.default_params()
         params.update(overrides.get(shader.path.stem, {}))
 
-        # Create persistent buffer FBOs for multi-pass shaders
+        # Create buffer FBOs for multi-pass shaders
         buffers: dict[str, _PersistentBuffer] = {}
+        temp_targets: dict[str, FBOSlot] = {}
         for p in shader.passes:
             if p.target and p.persistent:
                 slots = gl.fbo_pair(w, h, float_tex=p.float_tex)
                 for slot in slots:
                     slot.fbo.clear()
                 buffers[p.target] = _PersistentBuffer(slots)
+            elif p.target and not p.persistent:
+                # Non-persistent: single FBO for inter-pass communication
+                pair = gl.fbo_pair(w, h, float_tex=p.float_tex)
+                pair[1].release()  # only need one
+                pair[0].fbo.clear()
+                temp_targets[p.target] = pair[0]
 
-        compiled.append((shader, prog, shader_vao, params, buffers))
+        compiled.append((shader, prog, shader_vao, params, buffers, temp_targets))
 
     # Ping-pong FBOs for shader chaining
     fbo_a, fbo_b = gl.fbo_pair(w, h)
@@ -96,7 +103,7 @@ def _apply_shader_stack(
             current_tex = input_tex
             write_fbo = fbo_a
 
-            for shader, prog, shader_vao, params, buffers in compiled:
+            for shader, prog, shader_vao, params, buffers, temp_targets in compiled:
                 # Common uniforms
                 if "u_time" in prog:
                     prog["u_time"] = elapsed
@@ -108,11 +115,13 @@ def _apply_shader_stack(
                     if pname in prog:
                         prog[pname] = pval
 
-                if shader.is_multipass and buffers:
-                    # Multi-pass: render through persistent buffer FBOs
+                if shader.is_multipass and (buffers or temp_targets):
+                    # Multi-pass: render through buffer FBOs
                     for pass_idx, pass_info in enumerate(shader.passes):
                         if pass_info.target and pass_info.target in buffers:
                             buffers[pass_info.target].write_slot.fbo.use()
+                        elif pass_info.target and pass_info.target in temp_targets:
+                            temp_targets[pass_info.target].fbo.use()
                         else:
                             write_fbo.fbo.use()
 
@@ -123,12 +132,20 @@ def _apply_shader_stack(
                         if "inputImage" in prog:
                             prog["inputImage"] = 0
 
-                        for buf_i, (buf_name, pbuf) in enumerate(
-                            buffers.items()
-                        ):
-                            pbuf.read_texture.use(location=buf_i + 1)
+                        # Bind persistent buffer textures
+                        next_loc = 1
+                        for buf_name, pbuf in buffers.items():
+                            pbuf.read_texture.use(location=next_loc)
                             if buf_name in prog:
-                                prog[buf_name] = buf_i + 1
+                                prog[buf_name] = next_loc
+                            next_loc += 1
+
+                        # Bind non-persistent target textures
+                        for buf_name, slot in temp_targets.items():
+                            slot.texture.use(location=next_loc)
+                            if buf_name in prog:
+                                prog[buf_name] = next_loc
+                            next_loc += 1
 
                         shader_vao.render()
 
@@ -156,11 +173,13 @@ def _apply_shader_stack(
 
             frame_idx += 1
 
-    # Release persistent buffer FBOs
-    for _, _, _, _, buffers in compiled:
+    # Release buffer FBOs
+    for _, _, _, _, buffers, temp_targets in compiled:
         for pbuf in buffers.values():
             for slot in pbuf.slots:
                 slot.release()
+        for slot in temp_targets.values():
+            slot.release()
 
     gl.release()
     return dst
