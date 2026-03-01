@@ -202,11 +202,19 @@ class FeedbackTransformStep:
     amount: float = 0.02         # transform magnitude per frame
     mix: float = 0.7             # feedback strength 0-1
 
+@dataclass
+class QuadLoopStep:
+    """Quad loop — 4 independent loops at different offsets in a grid layout."""
+    loop_dur: float = 1.0
+    offset_scale: float = 0.5
+    layout: str = "grid_2x2"      # "grid_2x2" | "horizontal_bands" | "vertical_bands"
+
 Step = (CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep
         | PingPongStep | EchoStep | PatchStep | SlitScanStep | TemporalTileStep
         | SmearStep | BloomStep | StackStep | SlipStep
         | MirrorStep | ZoomStep | InvertStep | HueShiftStep | SaturateStep
-        | FlowWarpStep | TemporalSortStep | ExtremaHoldStep | FeedbackTransformStep)
+        | FlowWarpStep | TemporalSortStep | ExtremaHoldStep | FeedbackTransformStep
+        | QuadLoopStep)
 
 
 # ─── Transitions ──────────────────────────────────────────────────────────────
@@ -334,6 +342,8 @@ def _step_label(step: Step) -> str:
             return f"saturate ({a:.1f}x)"
         case FlowWarpStep(amplify=a, smooth=s):
             return f"flow-warp ({a:.1f}x, smooth={s})"
+        case QuadLoopStep(loop_dur=ld, offset_scale=os, layout=lay):
+            return f"quad-loop ({ld:.2f}s, offset={os:.2f}, {lay})"
         case _:
             return type(step).__name__
 
@@ -447,6 +457,9 @@ def _recipe_to_hashable(recipe: BrainWipeRecipe) -> str:
             case SlipStep():
                 return {"type": "slip", "n_bands": s.n_bands,
                         "max_slip": s.max_slip, "axis": s.axis}
+            case QuadLoopStep():
+                return {"type": "quad_loop", "loop_dur": s.loop_dur,
+                        "offset_scale": s.offset_scale, "layout": s.layout}
             case _:
                 return {"type": type(s).__name__}
 
@@ -558,6 +571,9 @@ def _step_to_dict(s: Step) -> dict:
         case FeedbackTransformStep():
             return {"type": "feedback_transform", "transform": s.transform,
                     "amount": s.amount, "mix": s.mix}
+        case QuadLoopStep():
+            return {"type": "quad_loop", "loop_dur": s.loop_dur,
+                    "offset_scale": s.offset_scale, "layout": s.layout}
         case _:
             raise ValueError(f"Unknown step type: {type(s).__name__}")
 
@@ -629,6 +645,10 @@ def _step_from_dict(d: dict) -> Step:
         return FeedbackTransformStep(transform=d.get("transform", "zoom"),
                                      amount=d.get("amount", 0.02),
                                      mix=d.get("mix", 0.7))
+    elif t == "quad_loop":
+        return QuadLoopStep(loop_dur=d.get("loop_dur", 1.0),
+                            offset_scale=d.get("offset_scale", 0.5),
+                            layout=d.get("layout", "grid_2x2"))
     else:
         raise ValueError(f"Unknown step type: {t}")
 
@@ -1484,6 +1504,7 @@ _STEP_POOL: list[tuple[type, int]] = [
     (TemporalSortStep, 2),  # per-pixel temporal reordering — alien dissolves
     (ExtremaHoldStep, 2),   # accumulation trails — long exposure for video
     (FeedbackTransformStep, 2),  # infinite regression / fractal echo
+    (QuadLoopStep, 1),            # 4 independent loops in a grid
     # Spatial / color transforms
     (MirrorStep, 2),
     (ZoomStep, 2),
@@ -1493,7 +1514,8 @@ _STEP_POOL: list[tuple[type, int]] = [
 ]
 
 _TIME_STEPS = (ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
-               SlitScanStep, TemporalTileStep, SmearStep, BloomStep, StackStep, SlipStep,
+               SlitScanStep, TemporalTileStep, QuadLoopStep, SmearStep, BloomStep,
+               StackStep, SlipStep,
                FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep)
 
 _TRANSITION_POOL: list[tuple[str, int]] = [
@@ -1871,7 +1893,8 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
     """Generate a random time-effect step with randomized parameters."""
     cls = rng.choice([
         ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
-        SlitScanStep, TemporalTileStep, SmearStep, BloomStep, StackStep, SlipStep,
+        SlitScanStep, TemporalTileStep, QuadLoopStep, SmearStep, BloomStep,
+        StackStep, SlipStep,
         FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
     ])
     if cls is ScrubStep:
@@ -1938,6 +1961,12 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
             transform=xform,
             amount=amt,
             mix=rng.uniform(0.5, 0.85),
+        )
+    elif cls is QuadLoopStep:
+        return QuadLoopStep(
+            loop_dur=rng.uniform(0.3, 2.0),
+            offset_scale=rng.uniform(0.2, 0.8),
+            layout=rng.choice(["grid_2x2", "horizontal_bands", "vertical_bands"]),
         )
     else:  # FlowWarpStep
         return FlowWarpStep(
@@ -2585,6 +2614,7 @@ _TIME_EFFECT_TYPES: dict[str, type] = {
     "bloom": BloomStep,
     "stack": StackStep,
     "temporal_sort": TemporalSortStep,
+    "quad_loop": QuadLoopStep,
 }
 
 

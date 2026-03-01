@@ -656,6 +656,125 @@ def temporal_tile(
     return dst
 
 
+@task(name="quad-loop")
+def quad_loop(
+    src: Path,
+    dst: Path,
+    *,
+    loop_dur: float = 1.0,
+    offset_scale: float = 0.5,
+    layout: str = "grid_2x2",
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Quad loop — 4 independent short loops at different speeds/offsets,
+    composited into a 2x2 grid (or banded layout).
+
+    Each quadrant shows the FULL source frame (resized to fit), looping
+    at a polyrhythmic rate relative to loop_dur.
+
+    loop_dur:      base loop length in seconds.
+    offset_scale:  how far apart start offsets are (0-1, fraction of total).
+    layout:        "grid_2x2", "horizontal_bands", or "vertical_bands".
+    seed:          random seed for start offsets.
+    """
+    import cv2
+
+    c = cfg or Config()
+    info = probe(src, c)
+    rng = np.random.default_rng(seed)
+
+    frames: list[np.ndarray] = []
+    for frame in read_frames(src, c):
+        frames.append(frame)
+    n = len(frames)
+
+    if n == 0:
+        raise ValueError(f"No frames read from {src}")
+
+    h, w = info.height, info.width
+    mem_mb = n * w * h * 3 / 1e6
+    print(f"quad_loop: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+    print(f"  layout={layout}, loop_dur={loop_dur:.2f}s, offset_scale={offset_scale:.2f}")
+    print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
+
+    # 4 quadrants with polyrhythmic loop multipliers
+    multipliers = [1.0, 1.25, 0.75, 1.5]
+    base_loop_frames = max(2, int(loop_dur * info.fps))
+
+    # Per-quadrant: loop length and start offset
+    quad_loops = []
+    max_offset = max(1, int(n * offset_scale))
+    for mult in multipliers:
+        loop_len = max(2, int(base_loop_frames * mult))
+        start = int(rng.integers(0, max_offset))
+        quad_loops.append((loop_len, start))
+
+    # Compute quadrant regions based on layout
+    if layout == "grid_2x2":
+        h2, w2 = h // 2, w // 2
+        regions = [
+            (0, 0, h2, w2),         # top-left
+            (0, w2, h2, w - w2),    # top-right
+            (h2, 0, h - h2, w2),    # bottom-left
+            (h2, w2, h - h2, w - w2),  # bottom-right
+        ]
+    elif layout == "horizontal_bands":
+        band_h = h // 4
+        regions = [
+            (0, 0, band_h, w),
+            (band_h, 0, band_h, w),
+            (band_h * 2, 0, band_h, w),
+            (band_h * 2 + band_h, 0, h - band_h * 3, w),
+        ]
+    else:  # vertical_bands
+        band_w = w // 4
+        regions = [
+            (0, 0, h, band_w),
+            (0, band_w, h, band_w),
+            (0, band_w * 2, h, band_w),
+            (0, band_w * 3, h, w - band_w * 3),
+        ]
+
+    # Pre-resize source frames for each quadrant size (avoid per-frame resize)
+    quad_resized: list[list[np.ndarray]] = []
+    for q_idx, (y0, x0, qh, qw) in enumerate(regions):
+        resized = []
+        for frame in frames:
+            resized.append(cv2.resize(frame, (qw, qh), interpolation=cv2.INTER_AREA))
+        quad_resized.append(resized)
+        print(f"  quadrant {q_idx}: {qw}x{qh}, loop={quad_loops[q_idx][0]}f, start={quad_loops[q_idx][1]}")
+
+    with FrameWriter(dst, info, cfg=c) as writer:
+        t0 = _time.monotonic()
+        last_log = t0
+        for out_idx in range(n):
+            out_frame = np.empty((h, w, 3), dtype=np.uint8)
+
+            for q_idx, (y0, x0, qh, qw) in enumerate(regions):
+                loop_len, start = quad_loops[q_idx]
+                # Position within this quadrant's loop
+                pos = (out_idx + start) % loop_len
+                src_idx = pos % n
+                out_frame[y0:y0 + qh, x0:x0 + qw] = quad_resized[q_idx][src_idx]
+
+            writer.write(out_frame)
+
+            now = _time.monotonic()
+            if now - last_log >= 5.0:
+                pct = (out_idx + 1) / n * 100
+                elapsed = now - t0
+                logger.info("quad_loop: %.0f%% (%d/%d) elapsed=%.1fs",
+                            pct, out_idx + 1, n, elapsed)
+                last_log = now
+
+    elapsed = _time.monotonic() - t0
+    print(f"  wrote {n} frames in {elapsed:.1f}s → {dst.name}")
+
+    return dst
+
+
 @task(name="smear")
 def smear(
     src: Path,

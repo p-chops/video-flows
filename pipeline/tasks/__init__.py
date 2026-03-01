@@ -17,7 +17,7 @@ from .color import normalize_levels
 from .glitch import bitrate_crush
 from .time import (
     time_scrub, drift_loop, ping_pong, echo_trail, time_patch,
-    slit_scan, temporal_tile, smear, bloom, frame_stack, slip, flow_warp,
+    slit_scan, temporal_tile, quad_loop, smear, bloom, frame_stack, slip, flow_warp,
     temporal_sort, extrema_hold, feedback_transform,
 )
 from .transition import (

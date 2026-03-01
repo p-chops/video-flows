@@ -92,6 +92,7 @@ from ..recipe import (
     TemporalSortStep,
     ExtremaHoldStep,
     FeedbackTransformStep,
+    QuadLoopStep,
     BlendComposite,
     MaskedComposite,
     RandomComposite,
@@ -123,6 +124,7 @@ from ..tasks import (
     transition_sequence,
     slit_scan,
     temporal_tile,
+    quad_loop,
     smear,
     bloom,
     frame_stack,
@@ -729,6 +731,11 @@ def _submit_step(
             return temporal_tile.submit(
                 src, dst, grid=grid, offset_scale=offset_scale,
                 seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case QuadLoopStep(loop_dur=loop_dur, offset_scale=offset_scale, layout=layout):
+            return quad_loop.submit(
+                src, dst, loop_dur=loop_dur, offset_scale=offset_scale,
+                layout=layout, seed=rng.randint(0, 2 ** 31), cfg=cfg,
             )
         case SmearStep(threshold=threshold):
             return smear.submit(
