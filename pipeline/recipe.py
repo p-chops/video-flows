@@ -267,7 +267,12 @@ class RandomComposite:
     """Random compositing operations (compositing-lab style)."""
     n_ops: int = 3
 
-CompositeSpec = BlendComposite | MaskedComposite | RandomComposite
+@dataclass
+class SplitComposite:
+    """Split screen — each lane gets a band of the frame."""
+    layout: str = "vertical"     # "vertical" (side by side) | "horizontal" (stacked)
+
+CompositeSpec = BlendComposite | MaskedComposite | RandomComposite | SplitComposite
 
 
 # ─── Top-level recipe ─────────────────────────────────────────────────────────
@@ -408,6 +413,8 @@ def print_recipe(recipe: BrainWipeRecipe) -> None:
                 print(f"  composite: masked({mt})")
             case RandomComposite(n_ops=n):
                 print(f"  composite: random({n} ops)")
+            case SplitComposite(layout=lay):
+                print(f"  composite: split({lay})")
         print()
 
     if recipe.post:
@@ -732,6 +739,8 @@ def _composite_to_dict(c: CompositeSpec) -> dict:
                     "mask_params": c.mask_params}
         case RandomComposite():
             return {"type": "random", "n_ops": c.n_ops}
+        case SplitComposite():
+            return {"type": "split", "layout": c.layout}
         case _:
             raise ValueError(f"Unknown composite type: {type(c).__name__}")
 
@@ -746,6 +755,8 @@ def _composite_from_dict(d: dict) -> CompositeSpec:
                                 mask_params=d.get("mask_params", {}))
     elif t == "random":
         return RandomComposite(n_ops=d.get("n_ops", 3))
+    elif t == "split":
+        return SplitComposite(layout=d.get("layout", "vertical"))
     else:
         raise ValueError(f"Unknown composite type: {t}")
 
@@ -2220,12 +2231,8 @@ def _build_polyrhythm(
     target_dur: Optional[float],
     seed: Optional[int],
 ) -> BrainWipeRecipe:
-    """2–4 lanes with harmonically-related temporal rates, brightness-neutral blend."""
-    actual_segments = _resolve_segments(rng, complexity, n_segments)
-    wants_transition = use_transitions if use_transitions is not None else (
-        rng.random() < 0.2 + 0.6 * complexity
-    )
-    seg_target = _seg_dur_target(target_dur, actual_segments, wants_transition)
+    """2–4 lanes with harmonically-related temporal rates, split-screen composite."""
+    td = target_dur or rng.uniform(5.0, 12.0)
 
     actual_lanes = n_lanes or max(2, int(2 + complexity * 2))
     base_rate = rng.uniform(0.2, 0.5)
@@ -2242,16 +2249,21 @@ def _build_polyrhythm(
             EchoStep(delay=0.0, trail=trail),
             _shader_step(rng, complexity, n=n_sh),
         ]
+        # Single short clip per lane — the time effect creates the rhythm
         source = _random_source(rng, src, use_generators, complexity)
-        lane = _make_lane(rng, source=source, steps=lane_steps,
-                          n_segments=actual_segments,
-                          wants_transition=wants_transition, seg_target=seg_target)
+        source = _override_source_dur(source, td)
+        lane = Lane(
+            source=source,
+            n_segments=1,
+            recipe=lane_steps,
+            sequencing="concat",
+        )
         lanes.append(lane)
 
     recipe = _assemble_recipe(lanes, rng=rng, complexity=complexity, src=src,
                               seed=seed, wants_post=rng.random() < 0.3)
-    recipe.composite = MaskedComposite(
-        mask_type=rng.choice(_MASK_TYPES),
+    recipe.composite = SplitComposite(
+        layout=rng.choice(["vertical", "horizontal"]),
     )
     return recipe
 

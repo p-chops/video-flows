@@ -54,6 +54,8 @@ import hashlib
 import random
 import shutil
 import subprocess
+
+import numpy as np
 from pathlib import Path
 from typing import Optional
 
@@ -96,6 +98,7 @@ from ..recipe import (
     BlendComposite,
     MaskedComposite,
     RandomComposite,
+    SplitComposite,
     print_recipe,
     hash_recipe,
 )
@@ -1170,6 +1173,38 @@ def _composite_lanes(
                 masked_composite(current, overlay, mask_path, dst, cfg=cfg)
                 current = dst
             shutil.copy2(current, out)
+
+        case SplitComposite(layout=layout):
+            from ..ffmpeg import read_frames, FrameWriter
+            base_info = probe(lane_paths[0], cfg)
+            h, w = base_info.height, base_info.width
+            n_lanes = len(lane_paths)
+
+            # Compute band regions — crop each lane's corresponding region
+            if layout == "horizontal":
+                band_h = h // n_lanes
+                regions = []
+                for i in range(n_lanes):
+                    y0 = i * band_h
+                    bh = band_h if i < n_lanes - 1 else h - y0
+                    regions.append((y0, 0, bh, w))
+            else:
+                band_w = w // n_lanes
+                regions = []
+                for i in range(n_lanes):
+                    x0 = i * band_w
+                    bw = band_w if i < n_lanes - 1 else w - x0
+                    regions.append((0, x0, h, bw))
+
+            # Crop each lane's band from its own frames (no resize)
+            streams = [read_frames(lp, cfg) for lp in lane_paths]
+            with FrameWriter(out, base_info, cfg=cfg) as writer:
+                for frames in zip(*streams):
+                    out_frame = np.empty((h, w, 3), dtype=np.uint8)
+                    for i, (y0, x0, bh, bw) in enumerate(regions):
+                        out_frame[y0:y0 + bh, x0:x0 + bw] = \
+                            frames[i][y0:y0 + bh, x0:x0 + bw]
+                    writer.write(out_frame)
 
         case RandomComposite():
             raise NotImplementedError(
