@@ -2558,7 +2558,100 @@ def _eligible_warp_focus(src, n_lanes, use_generators):
     return n_lanes is None or n_lanes == 1
 
 
-def _build_edge_poster(
+
+# ─── Boutique archetype ────────────────────────────────────────────────────
+
+# Time effect type name → Step dataclass mapping (for YAML config resolution).
+_TIME_EFFECT_TYPES: dict[str, type] = {
+    "echo": EchoStep,
+    "smear": SmearStep,
+    "feedback_transform": FeedbackTransformStep,
+    "drift": DriftStep,
+    "extrema_hold": ExtremaHoldStep,
+    "patch": PatchStep,
+    "slip": SlipStep,
+    "flow_warp": FlowWarpStep,
+    "scrub": ScrubStep,
+    "ping_pong": PingPongStep,
+    "slit_scan": SlitScanStep,
+    "temporal_tile": TemporalTileStep,
+    "bloom": BloomStep,
+    "stack": StackStep,
+    "temporal_sort": TemporalSortStep,
+}
+
+
+def load_boutique_stacks(
+    path: Optional[Path] = None,
+) -> list[tuple[str, list[str], dict]]:
+    """Load boutique stack definitions from YAML.
+
+    Returns list of (name, shader_names, time_effect_spec) tuples.
+    Default path: ``boutique_stacks.yaml`` in the project root.
+    """
+    import yaml
+
+    if path is None:
+        path = Path(__file__).resolve().parent.parent / "boutique_stacks.yaml"
+    with open(path) as f:
+        data = yaml.safe_load(f)
+    stacks = []
+    for name, spec in data["stacks"].items():
+        stacks.append((name, spec["shaders"], spec.get("time_effect", {})))
+    return stacks
+
+
+def _resolve_param(
+    rng: _random_mod.Random, value: Any, field_type: str = "float",
+) -> Any:
+    """Resolve a YAML param spec to a concrete value.
+
+    - scalar → as-is
+    - ``[min, max]`` → ``rng.uniform`` (float) or ``rng.randint`` (int)
+    - ``{choice: [...]}`` → ``rng.choice``
+    """
+    if isinstance(value, dict) and "choice" in value:
+        return rng.choice(value["choice"])
+    if isinstance(value, list) and len(value) == 2:
+        if field_type == "int":
+            return rng.randint(int(value[0]), int(value[1]))
+        return rng.uniform(float(value[0]), float(value[1]))
+    return value
+
+
+def _make_time_step(rng: _random_mod.Random, spec: dict) -> Step:
+    """Construct a time-effect Step from a YAML spec dict."""
+    import dataclasses as _dc
+
+    spec = dict(spec)  # don't mutate the cached original
+    type_name = spec.pop("type")
+    cls = _TIME_EFFECT_TYPES[type_name]
+    field_types = {f.name: f.type for f in _dc.fields(cls)}
+    kwargs = {
+        k: _resolve_param(rng, v, field_types.get(k, "float"))
+        for k, v in spec.items()
+    }
+    return cls(**kwargs)
+
+
+# Load stacks from YAML at import time.
+_BOUTIQUE_STACKS_RAW = load_boutique_stacks()
+
+# Backward-compatible (name, shader_names) list used by _build_boutique.
+_BOUTIQUE_STACKS = [(name, shaders) for name, shaders, _ in _BOUTIQUE_STACKS_RAW]
+
+
+def _boutique_time_step(
+    rng: _random_mod.Random, name: str, complexity: float,
+) -> Step:
+    """Return the time effect paired with a boutique stack (from YAML config)."""
+    for sname, _, spec in _BOUTIQUE_STACKS_RAW:
+        if sname == name:
+            return _make_time_step(rng, spec)
+    return EchoStep()  # fallback
+
+
+def _build_boutique(
     rng: _random_mod.Random,
     complexity: float,
     src: Optional[Path],
@@ -2571,64 +2664,50 @@ def _build_edge_poster(
     target_dur: Optional[float],
     seed: Optional[int],
 ) -> BrainWipeRecipe:
-    """Posterize → edge_glow pairing. Posterization generates bold edges that
-    move in interesting ways when time effects are applied."""
+    """Boutique collection: hand-designed shader stacks for distinctive textures.
+
+    Each stack is a curated 3-shader combination paired with a complementary
+    time effect — designed for lively, abstract, visually rich output.
+    One stack is chosen with equal probability.
+    """
     actual_segments = _resolve_segments(rng, complexity, n_segments)
-    wants_transition = use_transitions if use_transitions is not None else (
-        rng.random() < 0.2 + 0.6 * complexity
+    wants_transition = (
+        use_transitions if use_transitions is not None
+        else rng.random() < 0.2 + 0.6 * complexity
     )
     seg_target = _seg_dur_target(target_dur, actual_segments, wants_transition)
 
-    posterize = ShaderStep(shader_paths=[Path("shaders/posterize.fs")])
-    edge_glow = ShaderStep(shader_paths=[Path("shaders/edge_glow.fs")])
+    # Pick a curated stack
+    name, shader_names = rng.choice(_BOUTIQUE_STACKS)
+    _S = Path("shaders")
+    shader_paths = [_S / f"{s}.fs" for s in shader_names]
+
+    # Build the recipe: curated shaders → paired time effect → normalize
+    steps: list[Step] = [
+        ShaderStep(shader_paths=shader_paths),
+        _boutique_time_step(rng, name, complexity),
+        NormalizeStep(),
+    ]
 
     source = _random_source(rng, src, use_generators, complexity)
+    if seg_target is not None:
+        source = _override_source_dur(source, seg_target)
 
-    two_lane = (n_lanes is not None and n_lanes >= 2) or (
-        n_lanes is None and complexity > 0.6
+    lane = _make_lane(
+        rng, source=source, steps=steps,
+        n_segments=actual_segments,
+        wants_transition=wants_transition, seg_target=seg_target,
     )
 
-    if two_lane:
-        # Lane A: posterize → edge_glow → time effect (the edge-motion lane)
-        a_steps: list[Step] = [posterize, edge_glow, _random_time_step(rng, complexity)]
-
-        # Lane B: posterize → color shader (bold color blocks)
-        b_steps: list[Step] = [posterize, _shader_step(rng, complexity, n=1)]
-        if complexity > 0.5:
-            b_steps.append(_random_time_step(rng, complexity))
-
-        a_steps = _ensure_motion(rng, a_steps, source)
-
-        lane_a = _make_lane(rng, source=source, steps=a_steps,
-                            n_segments=actual_segments,
-                            wants_transition=wants_transition, seg_target=seg_target)
-        lane_b = _make_lane(rng, source=source, steps=b_steps,
-                            n_segments=actual_segments,
-                            wants_transition=wants_transition, seg_target=seg_target)
-
-        recipe = _assemble_recipe([lane_a, lane_b], rng=rng, complexity=complexity,
-                                  src=src, seed=seed, wants_post=False)
-        recipe.composite = MaskedComposite(
-            mask_type=rng.choice(["edge", "luma", "motion"]),
-        )
-        return recipe
-
-    # Single lane: posterize → edge_glow → optional color shader
-    # No time effects — let the natural edge motion be the star
-    steps: list[Step] = [posterize, edge_glow]
-    if rng.random() < 0.3 + complexity * 0.3:
-        steps.append(_shader_step(rng, complexity, n=1))
-
-    lane = _make_lane(rng, source=source, steps=steps,
-                      n_segments=actual_segments,
-                      wants_transition=wants_transition, seg_target=seg_target)
-
-    return _assemble_recipe([lane], rng=rng, complexity=complexity, src=src,
-                            seed=seed, wants_post=rng.random() < 0.2)
+    return _assemble_recipe(
+        [lane], rng=rng, complexity=complexity, src=src,
+        seed=seed, wants_post=False,
+    )
 
 
-def _eligible_edge_poster(src, n_lanes, use_generators):
-    return True
+def _eligible_boutique(src, n_lanes, use_generators):
+    return n_lanes is None or n_lanes == 1
+
 
 _ARCHETYPES: dict[str, tuple] = {
     # "crush_sandwich":    (_build_crush_sandwich, _eligible_crush_sandwich),
@@ -2642,7 +2721,7 @@ _ARCHETYPES: dict[str, tuple] = {
     "stutter":           (_build_stutter, _eligible_stutter),
     "echo_chamber":      (_build_echo_chamber, _eligible_echo_chamber),
     "warp_focus":        (_build_warp_focus, _eligible_warp_focus),
-    "edge_poster":       (_build_edge_poster, _eligible_edge_poster),
+    "boutique":          (_build_boutique, _eligible_boutique),
 }
 
 

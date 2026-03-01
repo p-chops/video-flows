@@ -92,9 +92,17 @@ class ISFShader:
         """Inputs that are images/textures."""
         return [i for i in self.inputs if i.type == "image"]
 
-    def default_params(self) -> dict[str, float]:
-        """Return a dict of parameter names → default values."""
-        out = {}
+    def default_params(self) -> dict[str, Any]:
+        """Return a dict of parameter names → default values.
+
+        Handles all ISF input types:
+        - float → float
+        - bool/event → float (0.0 or 1.0)
+        - long → int
+        - color → tuple of 4 floats (RGBA)
+        - point2D → tuple of 2 floats
+        """
+        out: dict[str, Any] = {}
         for inp in self.param_inputs:
             if inp.type == "float" and inp.default is not None:
                 out[inp.name] = float(inp.default)
@@ -102,6 +110,19 @@ class ISFShader:
                 out[inp.name] = 1.0 if inp.default else 0.0
             elif inp.type == "event":
                 out[inp.name] = 0.0
+            elif inp.type == "long" and inp.default is not None:
+                out[inp.name] = int(inp.default)
+            elif inp.type == "color" and inp.default is not None:
+                vals = [float(v) for v in inp.default]
+                # Pad to 4 components if short
+                while len(vals) < 4:
+                    vals.append(1.0)
+                out[inp.name] = tuple(vals[:4])
+            elif inp.type == "point2D" and inp.default is not None:
+                vals = [float(v) for v in inp.default]
+                while len(vals) < 2:
+                    vals.append(0.0)
+                out[inp.name] = tuple(vals[:2])
         return out
 
 
@@ -113,7 +134,10 @@ def _translate_isf_to_glsl(body: str, shader: ISFShader) -> str:
 
     Replacements:
         isf_FragNormCoord       → v_texcoord
+        vv_FragNormCoord        → v_texcoord  (v002 variant)
         IMG_NORM_PIXEL(tex, uv) → texture(tex, uv)
+        IMG_THIS_PIXEL(tex)     → texture(tex, v_texcoord)
+        IMG_THIS_NORM_PIXEL(tex)→ texture(tex, v_texcoord)
         IMG_PIXEL(tex, px)      → texelFetch(tex, ivec2(px), 0)
         RENDERSIZE              → u_rendersize
         TIME                    → u_time
@@ -124,22 +148,70 @@ def _translate_isf_to_glsl(body: str, shader: ISFShader) -> str:
 
     src = body
 
-    # IMG_NORM_PIXEL(texname, uv) → texture(texname, uv)
+    # Bool/event inputs are uniform floats but ISF shaders use them as
+    # booleans (if(name), name ? a : b, etc.).  Two-pass fix for #version 330:
+    #
+    # Pass 1: Convert "name == true" / "name != false" etc. to float
+    #   comparisons ("name > 0.5").  ISF convention uses true/false keywords
+    #   but our uniforms are float, so float == bool is a type error.
+    #
+    # Pass 2: Wrap remaining standalone uses with bool() so if(name) works.
+    #   Negative lookbehind for '.' prevents corrupting vec swizzle (.r).
+    #   Negative lookahead for comparison operators prevents double-
+    #   converting "name > 0.5" → "bool(name) > 0.5".
+    for inp in shader.inputs:
+        if inp.type in ("bool", "event"):
+            esc = re.escape(inp.name)
+            # Pass 1: true/false comparisons → float comparisons
+            src = re.sub(rf'(?<!\.)\b{esc}\b\s*==\s*true\b',
+                         f'{inp.name} > 0.5', src)
+            src = re.sub(rf'(?<!\.)\b{esc}\b\s*!=\s*true\b',
+                         f'{inp.name} < 0.5', src)
+            src = re.sub(rf'(?<!\.)\b{esc}\b\s*==\s*false\b',
+                         f'{inp.name} < 0.5', src)
+            src = re.sub(rf'(?<!\.)\b{esc}\b\s*!=\s*false\b',
+                         f'{inp.name} > 0.5', src)
+            # Pass 2: general bool wrapping (skip float comparisons)
+            src = re.sub(
+                rf'(?<!\.)\b{esc}\b(?!\s*[><=!])',
+                f'bool({inp.name})',
+                src,
+            )
+
+    # IMG_THIS_PIXEL(texname) → texture(texname, v_texcoord)
+    # (must come before IMG_PIXEL to avoid partial match)
     src = re.sub(
-        r'IMG_NORM_PIXEL\s*\(\s*(\w+)\s*,\s*([^)]+)\)',
+        r'IMG_THIS_PIXEL\s*\(\s*(\w+)\s*\)',
+        r'texture(\1, v_texcoord)',
+        src,
+    )
+
+    # IMG_THIS_NORM_PIXEL(texname) → texture(texname, v_texcoord)
+    src = re.sub(
+        r'IMG_THIS_NORM_PIXEL\s*\(\s*(\w+)\s*\)',
+        r'texture(\1, v_texcoord)',
+        src,
+    )
+
+    # IMG_NORM_PIXEL(texname, uv) → texture(texname, uv)
+    # Use nested-paren-aware pattern: (?:[^()]+|\([^)]*\))+ handles
+    # one level of nesting like vec2(0.5) inside the argument.
+    src = re.sub(
+        r'IMG_NORM_PIXEL\s*\(\s*(\w+)\s*,\s*((?:[^()]+|\([^)]*\))+)\)',
         r'texture(\1, \2)',
         src,
     )
 
     # IMG_PIXEL(texname, px) → texelFetch(texname, ivec2(px), 0)
     src = re.sub(
-        r'IMG_PIXEL\s*\(\s*(\w+)\s*,\s*([^)]+)\)',
+        r'IMG_PIXEL\s*\(\s*(\w+)\s*,\s*((?:[^()]+|\([^)]*\))+)\)',
         r'texelFetch(\1, ivec2(\2), 0)',
         src,
     )
 
     # Simple token replacements
     src = src.replace("isf_FragNormCoord", "v_texcoord")
+    src = src.replace("vv_FragNormCoord", "v_texcoord")
     src = src.replace("RENDERSIZE", "u_rendersize")
     src = src.replace("PASSINDEX", "u_passindex")
     src = src.replace("FRAMEINDEX", "u_frameindex")
@@ -172,7 +244,9 @@ def _translate_isf_to_glsl(body: str, shader: ISFShader) -> str:
         elif inp.type == "float":
             lines.append(f"uniform float {inp.name};")
         elif inp.type in ("bool", "event"):
-            # ISF bools/events are floats in practice (0 or 1)
+            # ISF bools/events are floats in practice (0 or 1).
+            # The body is patched below to wrap uses with bool() so
+            # if(name) works in #version 330.
             lines.append(f"uniform float {inp.name};")
         elif inp.type == "long":
             lines.append(f"uniform int {inp.name};")
@@ -200,18 +274,27 @@ def parse_isf(path: Path) -> ISFShader:
     """
     Parse an ISF .fs file and return an ISFShader with the translated GLSL.
     """
-    raw = path.read_text()
+    raw = path.read_text().lstrip()
 
     # Extract the JSON header: everything between /*{ and }*/
     match = re.match(r'/\*\s*(\{.+?\})\s*\*/', raw, re.DOTALL)
     if not match:
         raise ValueError(f"No ISF JSON header found in {path}")
 
-    header = json.loads(match.group(1))
+    # Strip trailing commas before } or ] (common ISF quirk, invalid JSON)
+    json_str = re.sub(r',\s*([}\]])', r'\1', match.group(1))
+    header = json.loads(json_str)
     body = raw[match.end():]
 
     inputs = [ISFInput.from_dict(d) for d in header.get("INPUTS", [])]
     passes = [ISFPass.from_dict(d) for d in header.get("PASSES", [{}])]
+
+    # Cross-reference PERSISTENT_BUFFERS top-level key with pass targets
+    # (some shaders declare persistence here instead of per-pass PERSISTENT flag)
+    persistent_names = set(header.get("PERSISTENT_BUFFERS", []))
+    for p in passes:
+        if p.target in persistent_names:
+            p.persistent = True
 
     shader = ISFShader(
         path=path,

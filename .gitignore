@@ -38,5 +38,9 @@ source/
 *.mp3
 *.flac
 
+# Shaders (external assets, not tracked)
+*.fs
+*.vs
+
 # Prefect
 .prefect/

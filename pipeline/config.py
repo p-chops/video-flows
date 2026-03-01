@@ -39,7 +39,7 @@ class Config:
     # ── GPU encoding (VideoToolbox) ───────────────────────────────────
     # When True, clean encodes use h264_videotoolbox instead of libx264.
     # Does NOT affect bitrate_crush dirty passes (they need libx264/mpeg2/mpeg4).
-    gpu_encode: bool = True
+    gpu_encode: bool = False
     # VideoToolbox quality scale: 1–100, higher = better quality / larger files.
     # ~60 ≈ CRF 18, ~35 ≈ CRF ~24 (visually acceptable for intermediates).
     vt_quality: int = 60

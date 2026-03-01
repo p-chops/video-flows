@@ -236,7 +236,7 @@ def print_stack(shaders: list[Path],
 # ─── Flow 1: warp_chain ───────────────────────────────────────────────────────
 
 @flow(name="warp-chain", log_prints=True,
-      task_runner=ConcurrentTaskRunner(max_workers=4))
+      task_runner=ConcurrentTaskRunner(max_workers=3))
 def warp_chain(
     src: Path,
     shader_dir: Optional[Path] = None,
@@ -344,7 +344,7 @@ def warp_chain(
 # ─── Flow 2: brain_wipe_render ───────────────────────────────────────────────
 
 @flow(name="brain-wipe-render", log_prints=True,
-      task_runner=ConcurrentTaskRunner(max_workers=4))
+      task_runner=ConcurrentTaskRunner(max_workers=3))
 def brain_wipe_render(
     shader_dir: Optional[Path] = None,
     shader_categories: Optional[list[str]] = None,
@@ -1168,7 +1168,7 @@ def _cleanup_work(work_dir: Path, recipe_tag: str) -> None:
 
 
 @flow(name="brain-wipe", log_prints=True,
-      task_runner=ConcurrentTaskRunner(max_workers=4))
+      task_runner=ConcurrentTaskRunner(max_workers=3))
 def brain_wipe(
     recipe: BrainWipeRecipe,
     output: Optional[Path] = None,

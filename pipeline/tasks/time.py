@@ -72,6 +72,12 @@ def _generate_playhead_curve(
     else:
         noise = np.zeros(n)
 
+    # Sharpen zero crossings — the raw noise drifts through zero slowly
+    # (lingering at low-speed reverse points). Signed power < 1 pushes
+    # values toward ±1, making the playhead snap between forward and
+    # reverse instead of decelerating through the turn.
+    noise = np.sign(noise) * np.abs(noise) ** 0.5
+
     # Velocity: base forward speed + scaled variation
     # Scale factor 3x so intensity=0.5 gives strong scrubbing (~30% reverse)
     # and intensity=1.0 is extreme (playhead barely drifts forward)

@@ -90,6 +90,8 @@ Known ISF host quirks (from Magic Music Visuals testing):
 - **`picture_in_picture`** — scale and position overlay at (x, y) on base (ffmpeg overlay filter)
 - **`chromakey_composite`** — HSV-based colour removal (frame-by-frame Python/OpenCV, the only non-ffmpeg composite task)
 
+All multi-input compositing tasks use both `shortest=1` in the filter graph AND `-shortest` as an output flag. Both are required — the filter-level flag handles mismatched inputs, the output flag tells the muxer to stop writing when the shortest stream ends. Without both, ffmpeg can hold the last frame of the shorter input.
+
 Blend modes use ffmpeg filter names mapped via `FFMPEG_BLEND_MODES` dict. Adding a new mode: add the mapping to the dict (ffmpeg blend mode names may differ from common names, e.g. `"add"` → `"addition"`).
 
 ## Adding New Capabilities
@@ -272,7 +274,7 @@ python -m pipeline.flows.brain_wipe brain-wipe-render -n 12 --segment-dur 20 --s
 python -m pipeline.flows.show_reel batch 10 -n 8 --src source.mp4 --footage-ratio 0.5 --min-complexity 0.5 --max-complexity 0.9
 ```
 
-All flows use `ConcurrentTaskRunner(max_workers=4)` for parallelism.
+Brain wipe flows use `ConcurrentTaskRunner(max_workers=3)`. Show reel and stooges flows use `max_workers=4`.
 
 ## Stooges Flow
 
@@ -299,12 +301,15 @@ python -m pipeline.flows.show_reel run -n 9 --src input/ --footage-ratio 0.7 --s
 # Batch: 9 reels at once
 python -m pipeline.flows.show_reel batch 9 -n 9 --seed 8400 --src input/ --footage-ratio 0.7 --min-complexity 0.3 --max-complexity 0.9 --min-dur 10 --max-dur 18
 
+# Target reel duration instead of show count (auto-calculates n_shows)
+python -m pipeline.flows.show_reel batch 20 --reel-dur 120 --src input/ --seed 6060
+
 # Human-in-the-loop: plan → edit manifest → render
 python -m pipeline.flows.show_reel plan -n 8 --seed 777 --src input/footage.mp4
 python -m pipeline.flows.show_reel render output/show_reel_777_manifest.json
 ```
 
-Key parameters: `n_shows` (number of segments), `min_dur`/`max_dur` (duration range), `min_complexity`/`max_complexity` (complexity range per show), `transition_dur`, `width`/`height`, `src` (optional source footage or directory), `footage_ratio` (0.0–1.0, default 0.4), `seed`.
+Key parameters: `n_shows` (number of segments), `reel_dur` (target reel duration in seconds — auto-calculates `n_shows` from avg show duration), `min_dur`/`max_dur` (per-show duration range), `min_complexity`/`max_complexity` (complexity range per show), `transition_dur`, `width`/`height`, `src` (optional source footage or directory), `footage_ratio` (0.0–1.0, default 0.4), `seed`. When both `n_shows` and `reel_dur` are omitted, defaults to 20 shows.
 
 Note: connect to persistent Prefect server via `PREFECT_API_URL=http://127.0.0.1:4200/api` for UI visibility. Without it, flows start ephemeral servers.
 
@@ -317,22 +322,21 @@ Shaders in `shaders/` directory, organized by function. Shaders use ISF v2 forma
 **Spatial/distortion**: warp, echo, pixel_sort, databend, scan_tear, bit_crush, feedback_zoom, block_shift, stereo_project, posterize, lens_warp, shear
 **Color/tone**: duotone, chromatic_shift, gradient_map, edge_glow, cyanotype, heat_sig, oxide, neon_bleed, bruise
 
-Deleted shaders (for reference): chromawave, false_color, plasma_tint, palette_cycle, interference, solarize_color, mirror_fracture, droste, swirl, tunnel — removed for aesthetic or functional reasons.
+Deleted shaders (for reference): chromawave, false_color, plasma_tint, palette_cycle, interference, solarize_color, mirror_fracture, droste, swirl, tunnel, ulp-warp-kaleidoscope — removed for aesthetic or functional reasons.
 
 ### Brain wipe / warp shaders (in `brain-wipe-shaders/`)
 
 Separate shader directory from the glitch/color library. Use `--shader-dir brain-wipe-shaders` with the brain wipe flows, or pass the path as `shader_dir` in Python.
 
-**7 video warpers (have `inputImage`):**
+**6 video warpers (have `inputImage`):**
 - `ulp-warp-fbm` — fractal domain warp (iterative FBM noise, 1–3 passes)
 - `ulp-warp-curl` — curl noise flow (divergence-free, no tearing)
 - `ulp-warp-gravitational` — multi-point gravitational lensing (up to 5 orbiting masses)
 - `ulp-warp-voronoi` — Voronoi cell refraction (convex/concave/edge-push modes)
-- `ulp-warp-kaleidoscope` — angular mirror symmetry (segments, rotation, zoom)
 - `ulp-warp-ripple` — concentric sine-wave displacement (amplitude, frequency, decay)
 - `ulp-warp-twist` — radial spiral distortion (twist amount, radius, falloff)
 
-**7 generators (no `inputImage`):** All tuned for dynamic range (mean 60–140, p5–p95 range >80).
+**12 generators (no `inputImage`):** All tuned for dynamic range (mean 60–140, p5–p95 range >80).
 - `ulp-brain-wipe-plasma` — sinusoidal plasma field
 - `ulp-brain-wipe-tunnel` — infinite geometric tunnel (smoothstep soft edges)
 - `ulp-brain-wipe-chladni` — vibrating plate resonance figures (exponential glow halo)
@@ -340,16 +344,33 @@ Separate shader directory from the glitch/color library. Use `--shader-dir brain
 - `ulp-infernal-drift` — domain-warped FBM fire (counterpart to abyssal_drift)
 - `ulp-bioluminescent-field` — deep-sea bioluminescence (ambient scatter + wide glow)
 - `abyssal_drift` — deep-sea ambient drift
-
-**Planned but not yet written:**
-- `ulp-brain-wipe-tunnel-video` — maps video onto tunnel surface (warper)
-- `ulp-brain-wipe-chladni-video` — Chladni gradient displacement (warper)
+- `ulp-curl-flow` — curl noise flow field visualization
+- `ulp-domain-warp-cascade` — cascading domain warp layers
+- `ulp-moire-interference` — optical moire interference patterns
+- `ulp-rotating-geometry` — rotating geometric forms
+- `ulp-voronoi-flow` — animated Voronoi cell flow
 
 All are tagged `"Warp"`, `"Brain Wipe"`, or `"Generator"` in ISF `CATEGORIES` and compatible with Magic Music Visuals for live use.
 
 ### Shader categories and filtering
 
 Shaders declare categories in their ISF `CATEGORIES` header array. The `filter_shaders()` utility in `brain_wipe.py` filters by category and/or by whether the shader has an `inputImage` input (warper vs generator). The `ISFShader` dataclass exposes `.categories` (list[str]) and `.image_inputs` (list of inputs with type `"image"`).
+
+## Filter Chain Merging
+
+When processing recipes, consecutive pure-ffmpeg steps are merged into a single `-vf "filter1,filter2,..."` command, eliminating intermediate encode/decode cycles. Implemented in `brain_wipe.py` via `_group_steps()` and `_apply_filter_chain` task.
+
+**Mergeable step types** (pure ffmpeg `-vf` filters): `MirrorStep`, `ZoomStep`, `InvertStep`, `HueShiftStep`, `SaturateStep`, `NormalizeStep`.
+
+**Non-mergeable** (break the chain): `CrushStep` (two-pass codec abuse), `ShaderStep` (GPU rendering), all time effects (frame-level Python with temporal state).
+
+Single mergeable steps still go through `_submit_step()` — merging only activates for runs of 2+.
+
+## GPU Encoding (VideoToolbox)
+
+`Config.gpu_encode` controls whether intermediate encodes use `h264_videotoolbox` (macOS hardware encoder) or `libx264`. **Default: disabled** (`gpu_encode=False`).
+
+VideoToolbox is ~9x faster per-encode but unreliable on long batches — the hardware encoder crashes with SIGBUS after ~16 reels despite `-allow_sw 1`. Since encoding is a small fraction of total render time, the reliability loss outweighs the speed gain.
 
 ## Known Issues / TODO
 
