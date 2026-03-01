@@ -652,6 +652,70 @@ def _make_flash_blender(decay: float):
     return blend
 
 
+def _make_dissolve_blender(seed: Optional[int]):
+    """Factory for random pixel dissolve blending."""
+    def blend(tail, head, n, h, w):
+        rng = np.random.default_rng(seed)
+        # Pre-generate a random threshold per pixel (one noise field)
+        noise = rng.random((h, w), dtype=np.float32)
+        for i in range(n):
+            t = (i + 1) / (n + 1)
+            mask = (noise < t).astype(np.uint8)
+            mask3 = mask[:, :, np.newaxis]
+            out = tail[i] * (1 - mask3) + head[i] * mask3
+            yield out.astype(np.uint8)
+    return blend
+
+
+def _make_pixelate_blender(max_block: int = 64):
+    """Factory for pixelate (mosaic) transition. A pixelates up, then B de-pixelates."""
+    def blend(tail, head, n, h, w):
+        for i in range(n):
+            t = (i + 1) / (n + 1)
+            # First half: A pixelates to max_block. Second half: B de-pixelates.
+            if t < 0.5:
+                # A pixelating: block size goes from 1 → max_block
+                phase = t * 2.0  # 0→1
+                block = max(1, int(1 + phase * (max_block - 1)))
+                frame = tail[i]
+            else:
+                # B de-pixelating: block size goes from max_block → 1
+                phase = (t - 0.5) * 2.0  # 0→1
+                block = max(1, int(max_block - phase * (max_block - 1)))
+                frame = head[i]
+            # Downsample then upsample to create mosaic
+            small_h = max(1, h // block)
+            small_w = max(1, w // block)
+            small = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+            out = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+            yield out
+    return blend
+
+
+def _make_zoom_blender():
+    """Factory for zoom-in reveal blending. Clip B zooms from center over A."""
+    def blend(tail, head, n, h, w):
+        for i in range(n):
+            t = (i + 1) / (n + 1)
+            # Scale goes from small to full frame
+            scale = t  # 0→1
+            if scale < 0.01:
+                yield tail[i]
+                continue
+            # Size of the zoomed-in B crop in the output
+            out_h = max(1, int(h * scale))
+            out_w = max(1, int(w * scale))
+            # Resize full B frame down to that size
+            small_b = cv2.resize(head[i], (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+            # Place centered on A
+            y0 = (h - out_h) // 2
+            x0 = (w - out_w) // 2
+            out = tail[i].copy()
+            out[y0:y0 + out_h, x0:x0 + out_w] = small_b
+            yield out
+    return blend
+
+
 def _make_slide_blender(direction: str):
     """Factory for slide (push) overlap blending."""
     def blend(tail, head, n, h, w):
@@ -715,11 +779,19 @@ def _make_blender(transition_type: str, seed: Optional[int], **kwargs):
         return _make_slide_blender(
             direction=kwargs.get("direction", "left"),
         )
+    elif transition_type == "dissolve":
+        return _make_dissolve_blender(seed=seed)
+    elif transition_type == "zoom":
+        return _make_zoom_blender()
+    elif transition_type == "pixelate":
+        return _make_pixelate_blender(
+            max_block=kwargs.get("max_block", 64),
+        )
     else:
         raise ValueError(f"Unknown transition type for streaming: {transition_type}")
 
 
-_RANDOM_TRANSITION_TYPES = ["crossfade", "luma_wipe", "whip_pan", "static_burst", "flash", "slide"]
+_RANDOM_TRANSITION_TYPES = ["crossfade", "luma_wipe", "whip_pan", "static_burst", "flash", "slide", "dissolve", "zoom", "pixelate"]
 _WIPE_PATTERNS = [
     "horizontal", "vertical", "radial", "diagonal",
     "directional", "noise", "star",
@@ -758,6 +830,13 @@ def _make_random_blender(seed: int):
     elif t_type == "slide":
         direction = str(rng.choice(_WHIP_DIRS))
         return _make_slide_blender(direction)
+    elif t_type == "dissolve":
+        return _make_dissolve_blender(seed)
+    elif t_type == "zoom":
+        return _make_zoom_blender()
+    elif t_type == "pixelate":
+        max_block = int(rng.integers(32, 96))
+        return _make_pixelate_blender(max_block)
     else:  # flash
         decay = float(rng.uniform(2.0, 5.0))
         return _make_flash_blender(decay)
