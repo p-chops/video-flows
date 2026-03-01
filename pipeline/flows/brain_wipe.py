@@ -50,10 +50,12 @@ CLI:
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import random
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 from pathlib import Path
@@ -1312,31 +1314,57 @@ def brain_wipe(
     print_recipe(recipe)
     print(f"  recipe hash: {recipe_tag}\n")
 
-    # ── Process each lane ─────────────────────────────────────────────────
+    # ── Pre-populate shader cache (thread-safety) ─────────────────────────
 
-    lane_outputs: list[Path] = []
+    for lane in recipe.lanes:
+        for step in lane.recipe:
+            if isinstance(step, ShaderStep) and not step.shader_paths:
+                s_dir = str(step.shader_dir or recipe.shader_dir or c.shader_dir)
+                if s_dir not in shader_cache:
+                    shader_cache[s_dir] = load_shader_dir(Path(s_dir))
+        if isinstance(lane.source, GeneratorSource):
+            bw_key = str(recipe.brain_wipe_dir)
+            if bw_key not in shader_cache:
+                shader_cache[bw_key] = load_shader_dir(recipe.brain_wipe_dir)
 
-    for lane_idx, lane in enumerate(recipe.lanes):
-        lane_rng = random.Random(rng.randint(0, 2 ** 31))
+    # ── Pre-derive lane seeds (deterministic regardless of thread order) ──
 
+    lane_seeds = [rng.randint(0, 2 ** 31) for _ in recipe.lanes]
+
+    # ── Process lanes ────────────────────────────────────────────────────
+
+    def _run_lane(lane_idx: int, lane, lane_seed: int) -> Path:
+        lane_rng = random.Random(lane_seed)
         print(f"─── Lane {lane_idx} ───")
-
-        # Materialise source segments
         source_items = _materialize_source(
             lane, lane_idx, lane_rng, shader_cache, recipe, recipe_tag, c,
         )
-
-        # Process through recipe steps
         processed = _process_lane(
             lane, lane_idx, source_items, lane_rng,
             shader_cache, recipe, recipe_tag, c,
         )
-
-        # Sequence into single output
-        sequenced = _sequence_lane(
+        return _sequence_lane(
             lane, lane_idx, processed, lane_rng, recipe, recipe_tag, c,
         )
-        lane_outputs.append(sequenced)
+
+    if len(recipe.lanes) == 1:
+        lane_outputs = [_run_lane(0, recipe.lanes[0], lane_seeds[0])]
+    else:
+        max_lane_workers = min(c.max_parallel_lanes, len(recipe.lanes))
+        with ThreadPoolExecutor(max_workers=max_lane_workers) as pool:
+            # Each thread gets its own copy of the Prefect flow context
+            # so task .submit() calls can find the flow's task runner.
+            futures = {}
+            for i, (lane, seed) in enumerate(
+                zip(recipe.lanes, lane_seeds)
+            ):
+                ctx = contextvars.copy_context()
+                futures[pool.submit(ctx.run, _run_lane, i, lane, seed)] = i
+            lane_outputs = [None] * len(recipe.lanes)
+            for future in as_completed(futures):
+                idx = futures[future]
+                lane_outputs[idx] = future.result()
+                print(f"─── Lane {idx} complete ───")
 
     # ── Composite lanes ───────────────────────────────────────────────────
 

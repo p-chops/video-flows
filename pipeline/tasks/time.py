@@ -157,7 +157,7 @@ def _process_scrub(
     return [frames[int(round(position[i])) % n] for i in range(n)]
 
 
-@task(name="time-scrub")
+@task(name="time-scrub", tags=["ram-heavy"])
 def time_scrub(
     src: Path,
     dst: Path,
@@ -248,7 +248,7 @@ def _process_drift(
     return output
 
 
-@task(name="drift-loop")
+@task(name="drift-loop", tags=["ram-heavy"])
 def drift_loop(
     src: Path,
     dst: Path,
@@ -318,7 +318,7 @@ def _process_ping_pong(
     return [frames[cycle[out_idx % cycle_len]] for out_idx in range(n)]
 
 
-@task(name="ping-pong")
+@task(name="ping-pong", tags=["ram-heavy"])
 def ping_pong(
     src: Path,
     dst: Path,
@@ -382,7 +382,7 @@ def _process_echo(
     return output
 
 
-@task(name="echo-trail")
+@task(name="echo-trail", tags=["ram-heavy"])
 def echo_trail(
     src: Path,
     dst: Path,
@@ -458,7 +458,7 @@ def _process_patch(
     return output
 
 
-@task(name="time-patch")
+@task(name="time-patch", tags=["ram-heavy"])
 def time_patch(
     src: Path,
     dst: Path,
@@ -529,7 +529,7 @@ def _process_slit_scan(
     return output
 
 
-@task(name="slit-scan")
+@task(name="slit-scan", tags=["ram-heavy"])
 def slit_scan(
     src: Path,
     dst: Path,
@@ -601,7 +601,7 @@ def _process_temporal_tile(
     return output
 
 
-@task(name="temporal-tile")
+@task(name="temporal-tile", tags=["ram-heavy"])
 def temporal_tile(
     src: Path,
     dst: Path,
@@ -711,7 +711,7 @@ def _process_quad_loop(
     return output
 
 
-@task(name="quad-loop")
+@task(name="quad-loop", tags=["ram-heavy"])
 def quad_loop(
     src: Path,
     dst: Path,
@@ -779,7 +779,7 @@ def _process_smear(
     return output
 
 
-@task(name="smear")
+@task(name="smear", tags=["ram-heavy"])
 def smear(
     src: Path,
     dst: Path,
@@ -836,7 +836,7 @@ def _process_bloom(
     return output
 
 
-@task(name="bloom")
+@task(name="bloom", tags=["ram-heavy"])
 def bloom(
     src: Path,
     dst: Path,
@@ -895,7 +895,7 @@ def _process_frame_stack(
     return output
 
 
-@task(name="frame-stack")
+@task(name="frame-stack", tags=["ram-heavy"])
 def frame_stack(
     src: Path,
     dst: Path,
@@ -967,7 +967,7 @@ def _process_slip(
     return output
 
 
-@task(name="slip")
+@task(name="slip", tags=["ram-heavy"])
 def slip(
     src: Path,
     dst: Path,
@@ -1054,7 +1054,7 @@ def _process_flow_warp(
     return output
 
 
-@task(name="flow-warp")
+@task(name="flow-warp", tags=["ram-heavy"])
 def flow_warp(
     src: Path,
     dst: Path,
@@ -1132,7 +1132,7 @@ def _process_temporal_sort(
     return [sorted_vol[i] for i in range(n)]
 
 
-@task(name="temporal-sort")
+@task(name="temporal-sort", tags=["ram-heavy"])
 def temporal_sort(
     src: Path,
     dst: Path,
@@ -1220,7 +1220,7 @@ def _process_extrema_hold(
     return output
 
 
-@task(name="extrema-hold")
+@task(name="extrema-hold", tags=["ram-heavy"])
 def extrema_hold(
     src: Path,
     dst: Path,
@@ -1314,7 +1314,7 @@ def _process_feedback_transform(
     return output
 
 
-@task(name="feedback-transform")
+@task(name="feedback-transform", tags=["ram-heavy"])
 def feedback_transform(
     src: Path,
     dst: Path,
@@ -1426,7 +1426,7 @@ def _apply_time_effect(
             raise ValueError(f"Not a time effect step: {type(step).__name__}")
 
 
-@task(name="fused-time-chain")
+@task(name="fused-time-chain", tags=["ram-heavy"])
 def fused_time_chain(
     src: Path,
     dst: Path,

@@ -19,8 +19,10 @@ Supports a human-in-the-loop workflow via CLI subcommands:
 
 from __future__ import annotations
 
+import contextvars
 import json
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -236,8 +238,7 @@ def show_reel_render(
 
     print(f"═══ Rendering Show Reel (seed={reel_seed}, {len(shows)} shows) ═══")
 
-    show_clips = []
-    for show in shows:
+    def _render_show(show: dict) -> Path:
         idx = show["index"]
         recipe = recipe_from_dict(show["recipe"])
         show_tag = hash_recipe(recipe)
@@ -270,7 +271,25 @@ def show_reel_render(
             result = show_path
             print(f"    brightness floor: avg={avg:.2f} → normalized")
 
-        show_clips.append(result)
+        return result
+
+    max_show_workers = min(c.max_parallel_shows, len(shows))
+    if max_show_workers <= 1:
+        show_clips = [_render_show(show) for show in shows]
+    else:
+        with ThreadPoolExecutor(max_workers=max_show_workers) as pool:
+            # Each thread gets its own copy of the Prefect flow context
+            # so brain_wipe subflows register as children of this flow.
+            futures = {}
+            for show in shows:
+                ctx = contextvars.copy_context()
+                futures[pool.submit(ctx.run, _render_show, show)] = show["index"]
+            show_clips_map = {}
+            for future in as_completed(futures):
+                idx = futures[future]
+                show_clips_map[idx] = future.result()
+                print(f"  show {idx:03d} complete")
+            show_clips = [show_clips_map[show["index"]] for show in shows]
 
     print(f"\n  all {len(shows)} shows rendered")
 

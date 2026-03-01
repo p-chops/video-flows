@@ -408,6 +408,35 @@ When processing recipes, consecutive steps of the same kind are fused to elimina
 
 Single-step groups still go through `_submit_step()` — merging/fusing only activates for runs of 2+.
 
+## Concurrency & Parallelism
+
+The pipeline supports parallel execution at multiple levels, controlled by `Config` fields and Prefect's tag-based concurrency limits.
+
+**Flow-level parallelism** (via `ThreadPoolExecutor`):
+- `max_parallel_lanes` (default: 2) — lanes within a single `brain_wipe` run process concurrently. Single-lane recipes skip threading entirely.
+- `max_parallel_shows` (default: 2) — shows within a single `show_reel_render` run render concurrently. Set to 1 for sequential (legacy) behavior.
+- Each thread gets its own `contextvars.copy_context()` snapshot so Prefect task submissions find the flow's task runner.
+
+**Task-level parallelism** (via Prefect `ConcurrentTaskRunner`):
+- `brain_wipe`: `max_workers=3` — segments within a lane process concurrently.
+- `show_reel` / `stooges`: `max_workers=4`.
+
+**Global resource limits** (via Prefect tag-based concurrency limits):
+- Tasks tagged `"gpu"`: `apply_shader`, `apply_shader_stack`, `apply_random_shader_stack` — limited by VRAM.
+- Tasks tagged `"ram-heavy"`: all 17 time effect tasks + `fused_time_chain` — limited by system RAM.
+- Create limits via: `prefect concurrency-limit create gpu 3` and `prefect concurrency-limit create ram-heavy 3`.
+- Without a Prefect server or without limits created, tags are inert — no behavioral change.
+
+**Hierarchy**:
+```
+show_reel_batch (sequential reels)
+  show_reel_render (ThreadPoolExecutor, max_parallel_shows)
+    brain_wipe per show (ConcurrentTaskRunner, max_workers=3)
+      ThreadPoolExecutor for lanes (max_parallel_lanes)
+        segments processed concurrently via Prefect futures
+          individual tasks throttled by gpu/ram-heavy tags
+```
+
 ## GPU Encoding (VideoToolbox)
 
 `Config.gpu_encode` controls whether intermediate encodes use `h264_videotoolbox` (macOS hardware encoder) or `libx264`. **Default: disabled** (`gpu_encode=False`).

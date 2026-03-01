@@ -185,7 +185,7 @@ def _apply_shader_stack(
     return dst
 
 
-@task(name="apply-shader", cache_policy=FILE_VALIDATED_INPUTS, persist_result=True)
+@task(name="apply-shader", tags=["gpu"], cache_policy=FILE_VALIDATED_INPUTS, persist_result=True)
 def apply_shader(src: Path, dst: Path, shader_path: Path,
                  params: Optional[dict[str, float]] = None,
                  cfg: Optional[Config] = None) -> Path:
@@ -198,7 +198,7 @@ def apply_shader(src: Path, dst: Path, shader_path: Path,
                                param_overrides=overrides, cfg=cfg)
 
 
-@task(name="apply-shader-stack", cache_policy=FILE_VALIDATED_INPUTS, persist_result=True)
+@task(name="apply-shader-stack", tags=["gpu"], cache_policy=FILE_VALIDATED_INPUTS, persist_result=True)
 def apply_shader_stack(src: Path, dst: Path,
                        shader_paths: list[Path],
                        param_overrides: Optional[dict[str, dict[str, float]]] = None,
@@ -211,7 +211,7 @@ def apply_shader_stack(src: Path, dst: Path,
                                param_overrides=param_overrides, cfg=cfg)
 
 
-@task(name="apply-random-shader-stack", cache_policy=FILE_VALIDATED_INPUTS, persist_result=True)
+@task(name="apply-random-shader-stack", tags=["gpu"], cache_policy=FILE_VALIDATED_INPUTS, persist_result=True)
 def apply_random_shader_stack(
     src: Path, dst: Path,
     shader_dir: Path,

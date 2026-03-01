@@ -44,6 +44,14 @@ class Config:
     # ~60 ≈ CRF 18, ~35 ≈ CRF ~24 (visually acceptable for intermediates).
     vt_quality: int = 60
 
+    # ── Concurrency ─────────────────────────────────────────────────────
+    # Max parallel lanes within a single brain_wipe flow run.
+    # 1 = sequential (legacy behavior). 2–4 typical.
+    max_parallel_lanes: int = 2
+    # Max parallel shows within a single show_reel_render flow run.
+    # 1 = sequential (legacy behavior). 2–3 typical.
+    max_parallel_shows: int = 3
+
     # ── FFmpeg ───────────────────────────────────────────────────────────
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
