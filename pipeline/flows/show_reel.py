@@ -339,6 +339,10 @@ def show_reel(
         src=src, footage_ratio=footage_ratio, seed=seed,
         output=output, cfg=c,
     )
+    # Save manifest alongside the run for reproducibility
+    manifest_path = c.work_dir / f"reel_{seed}_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, default=str) + "\n")
+    print(f"  manifest saved: {manifest_path}")
     return show_reel_render(manifest, cfg=c, cleanup=cleanup)
 
 
