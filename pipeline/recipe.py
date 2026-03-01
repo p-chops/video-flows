@@ -1567,13 +1567,11 @@ _STEP_POOL: list[tuple[type, int]] = [
     (FlowWarpStep, 3),   # motion exaggeration — the headline act
     (EchoStep, 2),        # motion blur / trails
     (DriftStep, 2),       # temporal drift
-    (SmearStep, 2),       # directional motion smear
+    # SmearStep, BloomStep, PatchStep removed — stasis amplifiers
     (SlipStep, 1),        # band-offset temporal slip
-    (BloomStep, 1),       # motion-triggered bloom
     (SlitScanStep, 1),    # slit scan
     (TemporalTileStep, 1),# temporal mosaic
     (StackStep, 1),       # frame averaging
-    (PatchStep, 1),       # random temporal patches
     (ScrubStep, 1),       # reduced — causes "stuttering"
     (PingPongStep, 1),    # reduced — causes "breathing"
     (TemporalSortStep, 2),  # per-pixel temporal reordering — alien dissolves
@@ -1588,8 +1586,8 @@ _STEP_POOL: list[tuple[type, int]] = [
     (SaturateStep, 2),
 ]
 
-_TIME_STEPS = (ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
-               SlitScanStep, TemporalTileStep, QuadLoopStep, SmearStep, BloomStep,
+_TIME_STEPS = (ScrubStep, DriftStep, PingPongStep, EchoStep,
+               SlitScanStep, TemporalTileStep, QuadLoopStep,
                StackStep, SlipStep,
                FlowWarpStep, TemporalSortStep, FeedbackTransformStep)
 
@@ -1967,10 +1965,10 @@ def _make_lane(
 def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
     """Generate a random time-effect step with randomized parameters."""
     cls = rng.choice([
-        ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
-        SlitScanStep, TemporalTileStep, QuadLoopStep, SmearStep, BloomStep,
+        ScrubStep, DriftStep, PingPongStep, EchoStep,
+        SlitScanStep, TemporalTileStep, QuadLoopStep,
         StackStep, SlipStep,
-        FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
+        FlowWarpStep, TemporalSortStep, FeedbackTransformStep,
     ])
     if cls is ScrubStep:
         return ScrubStep(
@@ -1978,12 +1976,12 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
             intensity=rng.uniform(0.2 + complexity * 0.3, 0.4 + complexity * 0.5),
         )
     elif cls is DriftStep:
-        return DriftStep(loop_dur=rng.uniform(0.3, 0.5 + complexity * 1.5))
+        return DriftStep(loop_dur=rng.uniform(1.0, 2.0 + complexity * 2.0))
     elif cls is PingPongStep:
-        return PingPongStep(window=rng.uniform(0.3, 0.5 + complexity * 1.0))
+        return PingPongStep(window=rng.uniform(1.0, 2.0 + complexity * 2.0))
     elif cls is EchoStep:
         delay = 0.0 if rng.random() < 0.4 else rng.uniform(0.02, 0.3)
-        return EchoStep(delay=delay, trail=rng.uniform(0.5 + complexity * 0.2, 0.9))
+        return EchoStep(delay=delay, trail=rng.uniform(0.3, 0.6))
     elif cls is PatchStep:
         mn = rng.uniform(0.03, 0.15)
         return PatchStep(patch_min=mn, patch_max=rng.uniform(mn + 0.1, 0.5))
@@ -2035,11 +2033,11 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
         return FeedbackTransformStep(
             transform=xform,
             amount=amt,
-            mix=rng.uniform(0.5, 0.85),
+            mix=rng.uniform(0.3, 0.55),
         )
     elif cls is QuadLoopStep:
         return QuadLoopStep(
-            loop_dur=rng.uniform(0.3, 2.0),
+            loop_dur=rng.uniform(1.0, 3.0),
             offset_scale=rng.uniform(0.2, 0.8),
             layout=rng.choice(["grid_2x2", "horizontal_bands", "vertical_bands"]),
         )
