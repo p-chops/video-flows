@@ -652,6 +652,47 @@ def _make_flash_blender(decay: float):
     return blend
 
 
+def _make_slide_blender(direction: str):
+    """Factory for slide (push) overlap blending."""
+    def blend(tail, head, n, h, w):
+        for i in range(n):
+            t = (i + 1) / (n + 1)
+            out = np.zeros((h, w, 3), dtype=np.uint8)
+
+            if direction in ("left", "right"):
+                offset = int(t * w)
+                if direction == "left":
+                    # A slides left, B enters from right
+                    if w - offset > 0:
+                        out[:, :w - offset] = tail[i][:, offset:]
+                    if offset > 0:
+                        out[:, w - offset:] = head[i][:, :offset]
+                else:
+                    # A slides right, B enters from left
+                    if w - offset > 0:
+                        out[:, offset:] = tail[i][:, :w - offset]
+                    if offset > 0:
+                        out[:, :offset] = head[i][:, w - offset:]
+            else:
+                offset = int(t * h)
+                if direction == "up":
+                    # A slides up, B enters from bottom
+                    if h - offset > 0:
+                        out[:h - offset, :] = tail[i][offset:, :]
+                    if offset > 0:
+                        out[h - offset:, :] = head[i][:offset, :]
+                else:
+                    # A slides down, B enters from top
+                    if h - offset > 0:
+                        out[offset:, :] = tail[i][:h - offset, :]
+                    if offset > 0:
+                        out[:offset, :] = head[i][h - offset:, :]
+
+            yield out
+
+    return blend
+
+
 def _make_blender(transition_type: str, seed: Optional[int], **kwargs):
     """Dispatch to the appropriate blender factory."""
     if transition_type == "luma_wipe":
@@ -670,11 +711,15 @@ def _make_blender(transition_type: str, seed: Optional[int], **kwargs):
         return _make_static_burst_blender(seed=seed)
     elif transition_type == "flash":
         return _make_flash_blender(decay=kwargs.get("decay", 3.0))
+    elif transition_type == "slide":
+        return _make_slide_blender(
+            direction=kwargs.get("direction", "left"),
+        )
     else:
         raise ValueError(f"Unknown transition type for streaming: {transition_type}")
 
 
-_RANDOM_TRANSITION_TYPES = ["crossfade", "luma_wipe", "whip_pan", "static_burst", "flash"]
+_RANDOM_TRANSITION_TYPES = ["crossfade", "luma_wipe", "whip_pan", "static_burst", "flash", "slide"]
 _WIPE_PATTERNS = [
     "horizontal", "vertical", "radial", "diagonal",
     "directional", "noise", "star",
@@ -710,6 +755,9 @@ def _make_random_blender(seed: int):
         return _make_whip_pan_blender(direction, blur_strength)
     elif t_type == "static_burst":
         return _make_static_burst_blender(seed)
+    elif t_type == "slide":
+        direction = str(rng.choice(_WHIP_DIRS))
+        return _make_slide_blender(direction)
     else:  # flash
         decay = float(rng.uniform(2.0, 5.0))
         return _make_flash_blender(decay)
