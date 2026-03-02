@@ -1302,6 +1302,124 @@ def temporal_sort(
 
 
 # ---------------------------------------------------------------------------
+# 14b. Temporal FFT Filtering
+# ---------------------------------------------------------------------------
+
+def _smooth_gate(freqs: np.ndarray, cutoff: float, below: bool) -> np.ndarray:
+    """Smooth sigmoid frequency gate. below=True passes frequencies below cutoff."""
+    k = 30.0
+    if below:
+        return 1.0 / (1.0 + np.exp(k * (freqs - cutoff)))
+    else:
+        return 1.0 / (1.0 + np.exp(-k * (freqs - cutoff)))
+
+
+def _process_temporal_fft(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    filter_type: str = "low_pass",
+    cutoff_low: float = 0.1,
+    cutoff_high: float = 0.5,
+    preserve_dc: bool = True,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Filter frame volume along time axis via FFT."""
+    n = len(frames)
+    if n < 4:
+        return list(frames)
+
+    # Stack to (T, H, W, 3) float32 volume
+    vol = np.stack(frames, axis=0).astype(np.float32)
+
+    # FFT along time axis (axis=0) — per-pixel, per-channel
+    spectrum = np.fft.rfft(vol, axis=0)  # (T//2+1, H, W, 3) complex
+
+    # Save DC bin before filtering
+    dc = spectrum[0].copy() if preserve_dc else None
+
+    # Build frequency mask (T//2+1,) — broadcast across spatial dims
+    n_bins = spectrum.shape[0]
+    freqs = np.linspace(0, 1, n_bins)  # 0 = DC, 1 = Nyquist
+
+    if filter_type == "low_pass":
+        mask = _smooth_gate(freqs, cutoff_low, below=True)
+    elif filter_type == "high_pass":
+        mask = _smooth_gate(freqs, cutoff_low, below=False)
+    elif filter_type == "band_pass":
+        mask = (_smooth_gate(freqs, cutoff_low, below=False)
+                * _smooth_gate(freqs, cutoff_high, below=True))
+    elif filter_type == "notch":
+        mask = 1.0 - (_smooth_gate(freqs, cutoff_low, below=False)
+                      * _smooth_gate(freqs, cutoff_high, below=True))
+    else:
+        mask = np.ones(n_bins)
+
+    # Apply mask (broadcast: (n_bins, 1, 1, 1))
+    spectrum *= mask[:, np.newaxis, np.newaxis, np.newaxis]
+
+    # Restore DC if requested
+    if dc is not None:
+        spectrum[0] = dc
+
+    # Inverse FFT, clip, convert
+    filtered = np.fft.irfft(spectrum, n=n, axis=0)
+    filtered = np.clip(filtered, 0, 255).astype(np.uint8)
+
+    return [filtered[i] for i in range(n)]
+
+
+@task(name="temporal-fft", tags=["ram-heavy"])
+def temporal_fft(
+    src: Path,
+    dst: Path,
+    *,
+    filter_type: str = "low_pass",
+    cutoff_low: float = 0.1,
+    cutoff_high: float = 0.5,
+    preserve_dc: bool = True,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """
+    Temporal FFT filtering — manipulate frequency content along the time axis.
+
+    Applies FFT per-pixel along the time dimension, filters in the frequency
+    domain, then inverse-transforms back. Produces effects impossible to
+    achieve frame-by-frame.
+
+    filter_type: "low_pass" (ghostly blur), "high_pass" (flicker isolation),
+                 "band_pass" (rhythmic extraction), "notch" (deflicker).
+    cutoff_low:  normalized frequency 0–1 (fraction of Nyquist).
+    cutoff_high: upper bound for band_pass/notch.
+    preserve_dc: keep DC bin to preserve average brightness. Default True.
+    seed:        unused, kept for interface consistency.
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+
+    with _load_frames(src, c) as frames:
+        n = len(frames)
+
+        print(f"temporal_fft: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  filter_type={filter_type}, cutoff_low={cutoff_low:.2f}, "
+              f"cutoff_high={cutoff_high:.2f}")
+        mem_mb = n * info.width * info.height * 3 / 1e6
+        print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
+
+        t0 = _time.monotonic()
+        output = _process_temporal_fft(
+            frames, info.fps,
+            filter_type=filter_type, cutoff_low=cutoff_low,
+            cutoff_high=cutoff_high, preserve_dc=preserve_dc, seed=seed,
+        )
+        elapsed = _time.monotonic() - t0
+        print(f"  filtered in {elapsed:.1f}s")
+
+        return _write_frames(output, dst, info, c, "temporal_fft")
+
+
+# ---------------------------------------------------------------------------
 # 15. Extrema Hold
 # ---------------------------------------------------------------------------
 
@@ -1650,7 +1768,7 @@ def _apply_time_effect(
         SlitScanStep, TemporalTileStep, QuadLoopStep,
         SmearStep, BloomStep, StackStep, SlipStep,
         FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
-        ScanRefreshStep,
+        ScanRefreshStep, TemporalFFTStep,
     )
     match step:
         case ScrubStep(smoothness=smoothness, intensity=intensity):
@@ -1687,6 +1805,11 @@ def _apply_time_effect(
             return _process_feedback_transform(frames, fps, transform=xform, amount=amount, mix=mix_val, seed=seed)
         case ScanRefreshStep(speed=speed, decay=decay, beam_width=beam_width, axis=axis):
             return _process_scan_refresh(frames, fps, speed=speed, decay=decay, beam_width=beam_width, axis=axis, seed=seed)
+        case TemporalFFTStep(filter_type=ft, cutoff_low=cl, cutoff_high=ch,
+                             preserve_dc=pdc):
+            return _process_temporal_fft(frames, fps, filter_type=ft,
+                                         cutoff_low=cl, cutoff_high=ch,
+                                         preserve_dc=pdc, seed=seed)
         case _:
             raise ValueError(f"Not a time effect step: {type(step).__name__}")
 

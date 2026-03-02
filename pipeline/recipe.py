@@ -217,12 +217,20 @@ class ScanRefreshStep:
     beam_width: float = 0.02     # fraction of scan dimension (0-1)
     axis: str = "horizontal"     # "horizontal" = top→bottom, "vertical" = left→right
 
+@dataclass
+class TemporalFFTStep:
+    """Temporal FFT filtering — manipulate frequency content along time axis."""
+    filter_type: str = "low_pass"  # "low_pass", "high_pass", "band_pass", "notch"
+    cutoff_low: float = 0.1        # normalized freq 0–1 (fraction of Nyquist)
+    cutoff_high: float = 0.5       # upper bound for band_pass/notch
+    preserve_dc: bool = True       # keep bin 0 to preserve average brightness
+
 Step = (CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep
         | PingPongStep | EchoStep | PatchStep | SlitScanStep | TemporalTileStep
         | SmearStep | BloomStep | StackStep | SlipStep
         | MirrorStep | ZoomStep | InvertStep | HueShiftStep | SaturateStep
         | FlowWarpStep | TemporalSortStep | ExtremaHoldStep | FeedbackTransformStep
-        | QuadLoopStep | ScanRefreshStep)
+        | QuadLoopStep | ScanRefreshStep | TemporalFFTStep)
 
 
 # ─── Transitions ──────────────────────────────────────────────────────────────
@@ -593,6 +601,10 @@ def _step_to_dict(s: Step) -> dict:
             return {"type": "scan_refresh", "speed": s.speed,
                     "decay": s.decay, "beam_width": s.beam_width,
                     "axis": s.axis}
+        case TemporalFFTStep():
+            return {"type": "temporal_fft", "filter_type": s.filter_type,
+                    "cutoff_low": s.cutoff_low, "cutoff_high": s.cutoff_high,
+                    "preserve_dc": s.preserve_dc}
         case _:
             raise ValueError(f"Unknown step type: {type(s).__name__}")
 
@@ -673,6 +685,11 @@ def _step_from_dict(d: dict) -> Step:
                                decay=d.get("decay", 3.0),
                                beam_width=d.get("beam_width", 0.02),
                                axis=d.get("axis", "horizontal"))
+    elif t == "temporal_fft":
+        return TemporalFFTStep(filter_type=d.get("filter_type", "low_pass"),
+                               cutoff_low=d.get("cutoff_low", 0.1),
+                               cutoff_high=d.get("cutoff_high", 0.5),
+                               preserve_dc=d.get("preserve_dc", True))
     else:
         raise ValueError(f"Unknown step type: {t}")
 
@@ -1986,7 +2003,7 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
         SlitScanStep, TemporalTileStep, QuadLoopStep,
         StackStep, SlipStep,
         FlowWarpStep, TemporalSortStep, FeedbackTransformStep,
-        ScanRefreshStep,
+        ScanRefreshStep, TemporalFFTStep,
     ])
     if cls is ScrubStep:
         return ScrubStep(
@@ -2065,6 +2082,31 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
             decay=rng.uniform(0.8, 2.0 + complexity * 1.0),
             beam_width=rng.uniform(0.02, 0.08),
             axis=rng.choice(["horizontal", "vertical"]),
+        )
+    elif cls is TemporalFFTStep:
+        ft = rng.choice(["low_pass", "high_pass", "band_pass", "notch"])
+        if ft == "low_pass":
+            # Aggressive — low cutoff = only glacial drift survives
+            cl = rng.uniform(0.02, 0.10)
+        elif ft == "high_pass":
+            # Aggressive — high cutoff = only fast flicker remains
+            cl = rng.uniform(0.3, 0.6)
+        elif ft == "band_pass":
+            # Narrow band — isolate one temporal rhythm
+            cl = rng.uniform(0.05, 0.3)
+            ch = rng.uniform(cl + 0.03, cl + 0.10)
+        else:  # notch
+            # Wide kill band — scoop out most of the temporal spectrum
+            cl = rng.uniform(0.03, 0.10)
+            ch = rng.uniform(0.6, 0.9)
+        # band_pass/notch set ch above; low_pass/high_pass don't use it
+        if ft in ("low_pass", "high_pass"):
+            ch = 0.5  # unused but keep valid
+        return TemporalFFTStep(
+            filter_type=ft,
+            cutoff_low=cl,
+            cutoff_high=ch,
+            preserve_dc=True,
         )
     else:  # FlowWarpStep
         return FlowWarpStep(
@@ -2696,6 +2738,7 @@ _TIME_EFFECT_TYPES: dict[str, type] = {
     "temporal_sort": TemporalSortStep,
     "quad_loop": QuadLoopStep,
     "scan_refresh": ScanRefreshStep,
+    "temporal_fft": TemporalFFTStep,
 }
 
 

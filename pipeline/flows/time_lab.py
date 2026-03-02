@@ -32,7 +32,7 @@ from typing import Optional
 from prefect import flow
 
 from ..config import Config
-from ..tasks.time import drift_loop, echo_trail, ping_pong, time_patch, time_scrub
+from ..tasks.time import drift_loop, echo_trail, ping_pong, time_patch, time_scrub, temporal_fft
 
 
 # ─── Flows ────────────────────────────────────────────────────────────────────
@@ -118,6 +118,26 @@ def time_lab_patch(
                       seed=seed, cfg=c)
 
 
+@flow(name="time-lab-temporal-fft", log_prints=True)
+def time_lab_temporal_fft(
+    src: Path,
+    output: Optional[Path] = None,
+    filter_type: str = "low_pass",
+    cutoff_low: float = 0.1,
+    cutoff_high: float = 0.5,
+    preserve_dc: bool = True,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Temporal FFT filtering — manipulate frequency content along time axis."""
+    c = cfg or Config()
+    c.ensure_dirs()
+    out = output or c.output_dir / "temporal_fft.mp4"
+    return temporal_fft(src, out, filter_type=filter_type, cutoff_low=cutoff_low,
+                        cutoff_high=cutoff_high, preserve_dc=preserve_dc,
+                        seed=seed, cfg=c)
+
+
 # Keep backward-compatible alias
 time_lab = time_lab_scrub
 
@@ -198,6 +218,25 @@ def _cli():
     p_patch.add_argument("--seed", type=int, default=None,
                          help="Random seed for reproducibility")
 
+    # --- temporal-fft ---
+    p_fft = sub.add_parser("temporal-fft",
+                           help="Temporal FFT filtering")
+    p_fft.add_argument("src", type=Path,
+                       help="Source video file")
+    p_fft.add_argument("-o", "--output", type=Path, default=None,
+                       help="Output path (default: output/temporal_fft.mp4)")
+    p_fft.add_argument("--filter-type", type=str, default="low_pass",
+                       choices=["low_pass", "high_pass", "band_pass", "notch"],
+                       help="Filter mode (default: low_pass)")
+    p_fft.add_argument("--cutoff-low", type=float, default=0.1,
+                       help="Low cutoff freq 0-1 (default: 0.1)")
+    p_fft.add_argument("--cutoff-high", type=float, default=0.5,
+                       help="High cutoff freq 0-1 (default: 0.5)")
+    p_fft.add_argument("--no-preserve-dc", action="store_true",
+                       help="Don't preserve DC bin (allows brightness shift)")
+    p_fft.add_argument("--seed", type=int, default=None,
+                       help="Random seed for reproducibility")
+
     args = parser.parse_args()
     cfg = Config()
     cfg.ensure_dirs()
@@ -229,6 +268,14 @@ def _cli():
         time_lab_patch(
             src=args.src, output=args.output,
             patch_min=args.patch_min, patch_max=args.patch_max,
+            seed=args.seed, cfg=cfg,
+        )
+    elif args.command == "temporal-fft":
+        time_lab_temporal_fft(
+            src=args.src, output=args.output,
+            filter_type=args.filter_type,
+            cutoff_low=args.cutoff_low, cutoff_high=args.cutoff_high,
+            preserve_dc=not args.no_preserve_dc,
             seed=args.seed, cfg=cfg,
         )
 

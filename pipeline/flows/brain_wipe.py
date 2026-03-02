@@ -98,6 +98,7 @@ from ..recipe import (
     FeedbackTransformStep,
     QuadLoopStep,
     ScanRefreshStep,
+    TemporalFFTStep,
     BlendComposite,
     MaskedComposite,
     RandomComposite,
@@ -145,6 +146,7 @@ from ..tasks import (
     extrema_hold,
     feedback_transform,
     scan_refresh,
+    temporal_fft,
     fused_time_chain,
 )
 
@@ -604,7 +606,7 @@ _TIME_STEP_TYPES = (
     SlitScanStep, TemporalTileStep, QuadLoopStep,
     SmearStep, BloomStep, StackStep, SlipStep,
     FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
-    ScanRefreshStep,
+    ScanRefreshStep, TemporalFFTStep,
 )
 
 # Time steps that don't consume a seed from the RNG in _submit_step
@@ -825,6 +827,12 @@ def _submit_step(
             return scan_refresh.submit(
                 src, dst, speed=speed, decay=decay, beam_width=bw, axis=axis,
                 seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case TemporalFFTStep(filter_type=ft, cutoff_low=cl, cutoff_high=ch,
+                             preserve_dc=pdc):
+            return temporal_fft.submit(
+                src, dst, filter_type=ft, cutoff_low=cl, cutoff_high=ch,
+                preserve_dc=pdc, seed=rng.randint(0, 2 ** 31), cfg=cfg,
             )
         case _:
             raise ValueError(f"Unknown step type: {type(step).__name__}")
