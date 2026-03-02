@@ -28,7 +28,7 @@ pipeline/
 │   ├── mask.py            # Luma, edge (Canny), motion, chroma, gradient masks
 │   ├── color.py           # normalize_levels, auto_levels — level stretch + gamma correction
 │   ├── glitch.py          # bitrate_crush — codec-based compression artifacts
-│   ├── time.py            # Temporal effects: scrub, drift, ping-pong, echo, patch, slit_scan, temporal_tile, smear, bloom, frame_stack, slip, flow_warp, temporal_sort, extrema_hold, feedback_transform
+│   ├── time.py            # Temporal effects: scrub, drift, ping-pong, echo, patch, slit_scan, temporal_tile, smear, bloom, frame_stack, slip, flow_warp, temporal_sort, extrema_hold, feedback_transform, scan_refresh
 │   ├── transform.py       # Spatial/color transforms: mirror, zoom, invert, hue_shift, saturate
 │   └── transition.py      # Transitions: crossfade, luma_wipe, whip_pan, static_burst, flash
 └── flows/                 # Prefect @flow compositions (example pipelines)
@@ -64,6 +64,13 @@ Uniforms for ISF `INPUTS` are declared based on type (float, bool/event as float
 **Config propagation**: Every task/flow takes an optional `Config` object. `Config()` with no args uses sensible defaults rooted at `.` (overridable via `VP_PROJECT_ROOT` env var). Always pass `cfg` through the chain.
 
 **Masks are 3-channel**: Even though masks are conceptually grayscale, they're stored as 3-channel RGB (gray duplicated across channels) for pipeline compatibility with FrameWriter. The red channel is used as alpha during compositing.
+
+**Memory-safe frame buffering**: `FrameBuffer` in `time.py` is a `Sequence`-compatible container that transparently chooses between RAM (`np.ndarray`) and disk (`np.memmap`) based on estimated frame buffer size. Three tiers controlled by `Config` fields:
+- Estimated size > `max_ram_mb` (default 4096) → `MemoryError` raised before any frames decoded (pre-flight gate)
+- Estimated size > `memmap_threshold_mb` (default 1024) → `np.memmap` backed by temp file in `work/`
+- Otherwise → `np.ndarray` in RAM (fast path)
+
+All 16 time effect task wrappers and `fused_time_chain` use `_load_frames()` which returns a `FrameBuffer`. Context manager (`with _load_frames(...) as frames:`) ensures memmap temp files are cleaned up. The `_process_*` helpers accept any `Sequence[np.ndarray]` — FrameBuffer satisfies `len()`, `[i]`, and iteration identically to `list[np.ndarray]`.
 
 ## Dependencies
 
@@ -177,8 +184,11 @@ Blend modes use ffmpeg filter names mapped via `FFMPEG_BLEND_MODES` dict. Adding
 | temporal_sort | `temporal_sort` | `mode`, `direction`, `seed` | All frames in RAM (3D volume) |
 | extrema_hold | `extrema_hold` | `mode`, `decay`, `seed` | Streaming (float32 canvas) |
 | feedback_transform | `feedback_transform` | `transform`, `amount`, `mix`, `seed` | Streaming (prev output) |
+| scan_refresh | `scan_refresh` | `speed`, `decay`, `beam_width`, `axis` | Streaming (float32 canvas) |
 
 **Removed from random recipe pool** (still available for manual use): `extrema_hold` (drives to black/white), `smear` (stasis amplifier), `bloom` (stasis amplifier), `patch` (stasis amplifier).
+
+**Brightness-preserving scan_refresh**: The beam writes pixels boosted above their true value; exponential decay pulls them below it. Over one full scan cycle the time-average equals the original pixel value. Boost factor: `decay / (1 - exp(-decay))`. Float32 phosphor buffer stores values > 255 mid-cycle; final output clips to uint8. Measured ~0.86–0.90x original brightness (remaining gap is highlight clipping at the beam).
 
 **Fused time chain**: `fused_time_chain` task applies multiple time effects in a single decode→process→encode pass. See "Filter Chain Merging" section.
 
@@ -200,7 +210,7 @@ Tasks in `pipeline/tasks/transform.py`. Pure ffmpeg filter-graph operations.
 
 A `BrainWipeRecipe` describes: **lanes** (parallel processing streams), **compositing** (how lanes combine), and **post-processing** (final steps). Each lane has a **source** (footage, generator, static, solid), a **recipe** (ordered list of processing steps), and **sequencing** (shuffle, concat, optional static interleaving).
 
-**Step types**: `CrushStep`, `ShaderStep`, `NormalizeStep`, `ScrubStep`, `DriftStep`, `PingPongStep`, `EchoStep`, `PatchStep`, `SlitScanStep`, `TemporalTileStep`, `SmearStep`, `BloomStep`, `StackStep`, `SlipStep`, `FlowWarpStep`, `TemporalSortStep`, `ExtremaHoldStep`, `FeedbackTransformStep`, `MirrorStep`, `ZoomStep`, `InvertStep`, `HueShiftStep`, `SaturateStep`. Adding new step types from labs: add a dataclass to `recipe.py`, add to the `Step` union, add a `case` branch in `_submit_step()` in `brain_wipe.py`. All step types must also have `_step_to_dict`/`_step_from_dict` serialization for show reel manifest roundtripping.
+**Step types**: `CrushStep`, `ShaderStep`, `NormalizeStep`, `ScrubStep`, `DriftStep`, `PingPongStep`, `EchoStep`, `PatchStep`, `SlitScanStep`, `TemporalTileStep`, `SmearStep`, `BloomStep`, `StackStep`, `SlipStep`, `FlowWarpStep`, `TemporalSortStep`, `ExtremaHoldStep`, `FeedbackTransformStep`, `ScanRefreshStep`, `MirrorStep`, `ZoomStep`, `InvertStep`, `HueShiftStep`, `SaturateStep`. Adding new step types from labs: add a dataclass to `recipe.py`, add to the `Step` union, add a `case` branch in `_submit_step()` in `brain_wipe.py`. All step types must also have `_step_to_dict`/`_step_from_dict` serialization for show reel manifest roundtripping.
 
 **ShaderStep.param_overrides**: Optional `dict[str, dict[str, float]]` mapping shader stems to parameter dicts. Passed through to `apply_shader_stack` as custom uniform values. Used by boutique stacks to set per-shader parameters (e.g., `{"video_heightfield": {"MAXHEIGHT": 0.5, "SLICES": 128}}`).
 
@@ -413,10 +423,10 @@ When processing recipes, consecutive steps of the same kind are fused to elimina
 - Mergeable types: `MirrorStep`, `ZoomStep`, `InvertStep`, `HueShiftStep`, `SaturateStep`, `NormalizeStep`.
 
 **2. Fused time effect chain** — consecutive time effect steps processed on a single in-memory frame buffer via `fused_time_chain` task. One decode, N effects, one encode.
-- Fuseable types: all time step types (`ScrubStep`, `DriftStep`, `PingPongStep`, `EchoStep`, `PatchStep`, `SlitScanStep`, `TemporalTileStep`, `QuadLoopStep`, `SmearStep`, `BloomStep`, `StackStep`, `SlipStep`, `FlowWarpStep`, `TemporalSortStep`, `ExtremaHoldStep`, `FeedbackTransformStep`).
+- Fuseable types: all time step types (`ScrubStep`, `DriftStep`, `PingPongStep`, `EchoStep`, `PatchStep`, `SlitScanStep`, `TemporalTileStep`, `QuadLoopStep`, `SmearStep`, `BloomStep`, `StackStep`, `SlipStep`, `FlowWarpStep`, `TemporalSortStep`, `ExtremaHoldStep`, `FeedbackTransformStep`, `ScanRefreshStep`).
 - Each effect has a `_process_*` helper that operates on `list[np.ndarray]` — no file I/O. The `@task` wrappers are thin I/O shells.
 - `_apply_time_effect()` dispatches step dataclasses to helpers via `match`/`case`.
-- Seed consumption matches `_submit_step` exactly: seedless steps (`EchoStep`, `SmearStep`, `BloomStep`, `StackStep`) get `None`.
+- Seed consumption matches `_submit_step` exactly: seedless steps (`EchoStep`, `SmearStep`, `BloomStep`, `StackStep`, `ScanRefreshStep`) get `None`.
 - Deep time recipes (5–8 stacked time effects) benefit most — ~5x fewer encode/decode cycles.
 
 **3. Singleton** — everything else (`CrushStep`, `ShaderStep`) processed individually via `_submit_step()`.
@@ -438,7 +448,7 @@ The pipeline supports parallel execution at multiple levels, controlled by `Conf
 
 **Global resource limits** (via Prefect tag-based concurrency limits):
 - Tasks tagged `"gpu"`: `apply_shader`, `apply_shader_stack`, `apply_random_shader_stack` — limited by VRAM.
-- Tasks tagged `"ram-heavy"`: all 17 time effect tasks + `fused_time_chain` — limited by system RAM.
+- Tasks tagged `"ram-heavy"`: all 18 time effect tasks + `fused_time_chain` — limited by system RAM.
 - Create limits via: `prefect concurrency-limit create gpu 3` and `prefect concurrency-limit create ram-heavy 3`.
 - Without a Prefect server or without limits created, tags are inert — no behavioral change.
 
