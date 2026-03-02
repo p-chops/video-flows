@@ -41,9 +41,20 @@ source/
 # Shaders (external assets, not tracked)
 *.fs
 *.vs
+shaders/
+brain-wipe-shaders/
 
-# One-off render/test scripts
+# External assets and config
+boutique_stacks.yaml
+
+# Docs (local only)
+docs/
+
+# Scripts (local only)
 scripts/
+
+# Backups
+backup/
 
 # Prefect
 .prefect/

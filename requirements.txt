@@ -1,4 +1,0 @@
-prefect>=3.0
-moderngl
-numpy
-opencv-python-headless
