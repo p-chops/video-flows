@@ -52,6 +52,14 @@ class Config:
     # 1 = sequential (legacy behavior). 2–3 typical.
     max_parallel_shows: int = 3
 
+    # ── Memory ─────────────────────────────────────────────────────────
+    # Hard ceiling on estimated RAM for a single frame buffer load.
+    # Tasks that would exceed this raise MemoryError before decoding.
+    max_ram_mb: int = 4096
+    # Frame buffers above this size use a memory-mapped temp file
+    # instead of RAM.  Below this threshold → pure in-memory (fast).
+    memmap_threshold_mb: int = 1024
+
     # ── FFmpeg ───────────────────────────────────────────────────────────
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"

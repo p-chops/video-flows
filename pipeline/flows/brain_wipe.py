@@ -97,6 +97,7 @@ from ..recipe import (
     ExtremaHoldStep,
     FeedbackTransformStep,
     QuadLoopStep,
+    ScanRefreshStep,
     BlendComposite,
     MaskedComposite,
     RandomComposite,
@@ -143,6 +144,7 @@ from ..tasks import (
     temporal_sort,
     extrema_hold,
     feedback_transform,
+    scan_refresh,
     fused_time_chain,
 )
 
@@ -602,6 +604,7 @@ _TIME_STEP_TYPES = (
     SlitScanStep, TemporalTileStep, QuadLoopStep,
     SmearStep, BloomStep, StackStep, SlipStep,
     FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
+    ScanRefreshStep,
 )
 
 # Time steps that don't consume a seed from the RNG in _submit_step
@@ -816,6 +819,11 @@ def _submit_step(
         case FeedbackTransformStep(transform=xform, amount=amount, mix=mix_val):
             return feedback_transform.submit(
                 src, dst, transform=xform, amount=amount, mix=mix_val,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case ScanRefreshStep(speed=speed, decay=decay, beam_width=bw, axis=axis):
+            return scan_refresh.submit(
+                src, dst, speed=speed, decay=decay, beam_width=bw, axis=axis,
                 seed=rng.randint(0, 2 ** 31), cfg=cfg,
             )
         case _:

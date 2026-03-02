@@ -209,12 +209,20 @@ class QuadLoopStep:
     offset_scale: float = 0.5
     layout: str = "grid_2x2"      # "grid_2x2" | "horizontal_bands" | "vertical_bands"
 
+@dataclass
+class ScanRefreshStep:
+    """CRT phosphor scan refresh — beam sweeps, phosphor decays behind it."""
+    speed: float = 0.5           # sweep rate in cycles per second
+    decay: float = 3.0           # phosphor decay rate (higher = faster fade)
+    beam_width: float = 0.02     # fraction of scan dimension (0-1)
+    axis: str = "horizontal"     # "horizontal" = top→bottom, "vertical" = left→right
+
 Step = (CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep
         | PingPongStep | EchoStep | PatchStep | SlitScanStep | TemporalTileStep
         | SmearStep | BloomStep | StackStep | SlipStep
         | MirrorStep | ZoomStep | InvertStep | HueShiftStep | SaturateStep
         | FlowWarpStep | TemporalSortStep | ExtremaHoldStep | FeedbackTransformStep
-        | QuadLoopStep)
+        | QuadLoopStep | ScanRefreshStep)
 
 
 # ─── Transitions ──────────────────────────────────────────────────────────────
@@ -581,6 +589,10 @@ def _step_to_dict(s: Step) -> dict:
         case QuadLoopStep():
             return {"type": "quad_loop", "loop_dur": s.loop_dur,
                     "offset_scale": s.offset_scale, "layout": s.layout}
+        case ScanRefreshStep():
+            return {"type": "scan_refresh", "speed": s.speed,
+                    "decay": s.decay, "beam_width": s.beam_width,
+                    "axis": s.axis}
         case _:
             raise ValueError(f"Unknown step type: {type(s).__name__}")
 
@@ -656,6 +668,11 @@ def _step_from_dict(d: dict) -> Step:
         return QuadLoopStep(loop_dur=d.get("loop_dur", 1.0),
                             offset_scale=d.get("offset_scale", 0.5),
                             layout=d.get("layout", "grid_2x2"))
+    elif t == "scan_refresh":
+        return ScanRefreshStep(speed=d.get("speed", 0.5),
+                               decay=d.get("decay", 3.0),
+                               beam_width=d.get("beam_width", 0.02),
+                               axis=d.get("axis", "horizontal"))
     else:
         raise ValueError(f"Unknown step type: {t}")
 

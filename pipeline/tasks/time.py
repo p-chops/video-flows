@@ -104,14 +104,123 @@ def _generate_playhead_curve(
     return position
 
 
-def _load_frames(src: Path, cfg: Config) -> list[np.ndarray]:
-    """Load all frames from a video file into RAM."""
-    frames: list[np.ndarray] = []
+class FrameBuffer:
+    """List-like frame buffer backed by RAM or a memory-mapped temp file.
+
+    Decision logic (on creation):
+      estimated size > cfg.max_ram_mb       → MemoryError (pre-flight gate)
+      estimated size > cfg.memmap_threshold_mb → np.memmap (disk-backed)
+      otherwise                              → np.ndarray  (pure RAM)
+
+    Supports len(), indexing, iteration, append(), and context-manager
+    cleanup — a drop-in replacement for list[np.ndarray] in _process_*
+    helpers.
+    """
+
+    def __init__(
+        self,
+        capacity: int,
+        height: int,
+        width: int,
+        *,
+        cfg: Optional[Config] = None,
+    ):
+        c = cfg or Config()
+        self._capacity = capacity
+        self._count = 0
+        self._tmppath: Optional[Path] = None
+
+        size_mb = capacity * height * width * 3 / 1e6
+        if size_mb > c.max_ram_mb:
+            raise MemoryError(
+                f"Frame buffer would use ~{size_mb:.0f} MB "
+                f"(limit {c.max_ram_mb} MB) — clip too long for in-memory processing"
+            )
+
+        shape = (capacity, height, width, 3)
+        if size_mb > c.memmap_threshold_mb:
+            import tempfile
+            work = c.work_dir
+            work.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(suffix=".mmap", dir=str(work))
+            import os as _os
+            _os.close(fd)
+            self._tmppath = Path(tmp)
+            self._data = np.memmap(
+                str(self._tmppath), dtype=np.uint8, mode="w+", shape=shape,
+            )
+            logger.info("FrameBuffer: memmap %.0f MB → %s", size_mb, self._tmppath.name)
+        else:
+            self._data = np.empty(shape, dtype=np.uint8)
+
+    # ── Sequence interface ─────────────────────────────────────────────
+    def __len__(self) -> int:
+        return self._count
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            return [self._data[i] for i in range(*idx.indices(self._count))]
+        if idx < 0:
+            idx += self._count
+        if not 0 <= idx < self._count:
+            raise IndexError(idx)
+        return self._data[idx]
+
+    def __setitem__(self, idx: int, value):
+        if idx < 0:
+            idx += self._count
+        self._data[idx] = value
+
+    def __iter__(self):
+        for i in range(self._count):
+            yield self._data[i]
+
+    def append(self, frame: np.ndarray):
+        if self._count >= self._capacity:
+            raise RuntimeError(
+                f"FrameBuffer full ({self._capacity} frames)"
+            )
+        self._data[self._count] = frame
+        self._count += 1
+
+    # ── Utilities ──────────────────────────────────────────────────────
+    @property
+    def is_memmap(self) -> bool:
+        return self._tmppath is not None
+
+    def cleanup(self):
+        """Release memmap and delete temp file (no-op for RAM buffers)."""
+        if self._tmppath is not None:
+            del self._data
+            try:
+                self._tmppath.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._tmppath = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.cleanup()
+        return False
+
+
+def _load_frames(src: Path, cfg: Config) -> FrameBuffer:
+    """Load all frames into a FrameBuffer (RAM or memmap depending on size).
+
+    Raises MemoryError before decoding if the estimated buffer exceeds
+    cfg.max_ram_mb.
+    """
+    info = probe(src, cfg)
+    n_est = int(info.duration * info.fps) + 1
+    buf = FrameBuffer(n_est, info.height, info.width, cfg=cfg)
     for frame in read_frames(src, cfg):
-        frames.append(frame)
-    if not frames:
+        buf.append(frame)
+    if len(buf) == 0:
+        buf.cleanup()
         raise ValueError(f"No frames read from {src}")
-    return frames
+    return buf
 
 
 def _write_frames(
@@ -188,18 +297,18 @@ def time_scrub(
     print(f"time_scrub: {n_frames} frames, {info.duration:.1f}s @ {info.fps}fps")
     print(f"  smoothness={smoothness}, intensity={intensity}, seed={seed}")
 
-    frames = _load_frames(src, c)
-    n_loaded = len(frames)
-    print(f"  loaded {n_loaded} frames ({n_loaded * info.width * info.height * 3 / 1e6:.0f} MB)")
+    with _load_frames(src, c) as frames:
+        n_loaded = len(frames)
+        print(f"  loaded {n_loaded} frames ({n_loaded * info.width * info.height * 3 / 1e6:.0f} MB)")
 
-    position = _generate_playhead_curve(n_loaded, info.fps, smoothness, intensity, seed)
-    velocity = np.diff(position)
-    pct_reverse = (velocity < 0).sum() / max(len(velocity), 1) * 100
-    print(f"  playhead: speed range [{velocity.min():.2f}, {velocity.max():.2f}], "
-          f"{pct_reverse:.0f}% reverse")
+        position = _generate_playhead_curve(n_loaded, info.fps, smoothness, intensity, seed)
+        velocity = np.diff(position)
+        pct_reverse = (velocity < 0).sum() / max(len(velocity), 1) * 100
+        print(f"  playhead: speed range [{velocity.min():.2f}, {velocity.max():.2f}], "
+              f"{pct_reverse:.0f}% reverse")
 
-    output = _process_scrub(frames, info.fps, smoothness=smoothness, intensity=intensity, seed=seed)
-    return _write_frames(output, dst, info, c, "time_scrub")
+        output = _process_scrub(frames, info.fps, smoothness=smoothness, intensity=intensity, seed=seed)
+        return _write_frames(output, dst, info, c, "time_scrub")
 
 
 # ---------------------------------------------------------------------------
@@ -274,20 +383,20 @@ def drift_loop(
     c = cfg or Config()
     info = probe(src, c)
 
-    frames = _load_frames(src, c)
-    n = len(frames)
-    fps = info.fps
+    with _load_frames(src, c) as frames:
+        n = len(frames)
+        fps = info.fps
 
-    loop_frames = max(1, round(loop_dur * fps))
-    loop_frames = min(loop_frames, n)
-    n_cycles = n / loop_frames
+        loop_frames = max(1, round(loop_dur * fps))
+        loop_frames = min(loop_frames, n)
+        n_cycles = n / loop_frames
 
-    print(f"drift_loop: {n} frames, {info.duration:.1f}s @ {fps}fps")
-    mem_mb = n * info.width * info.height * 3 / 1e6
-    print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
+        print(f"drift_loop: {n} frames, {info.duration:.1f}s @ {fps}fps")
+        mem_mb = n * info.width * info.height * 3 / 1e6
+        print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
-    output = _process_drift(frames, fps, loop_dur=loop_dur, drift=drift, seed=seed)
-    return _write_frames(output, dst, info, c, "drift_loop")
+        output = _process_drift(frames, fps, loop_dur=loop_dur, drift=drift, seed=seed)
+        return _write_frames(output, dst, info, c, "drift_loop")
 
 
 # ---------------------------------------------------------------------------
@@ -340,18 +449,18 @@ def ping_pong(
     c = cfg or Config()
     info = probe(src, c)
 
-    frames = _load_frames(src, c)
-    n = len(frames)
-    fps = info.fps
-    win_frames = max(2, round(window * fps))
-    win_frames = min(win_frames, n)
+    with _load_frames(src, c) as frames:
+        n = len(frames)
+        fps = info.fps
+        win_frames = max(2, round(window * fps))
+        win_frames = min(win_frames, n)
 
-    print(f"ping_pong: {n} frames, {info.duration:.1f}s @ {fps}fps")
-    mem_mb = n * info.width * info.height * 3 / 1e6
-    print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
+        print(f"ping_pong: {n} frames, {info.duration:.1f}s @ {fps}fps")
+        mem_mb = n * info.width * info.height * 3 / 1e6
+        print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
-    output = _process_ping_pong(frames, fps, window=window, seed=seed)
-    return _write_frames(output, dst, info, c, "ping_pong")
+        output = _process_ping_pong(frames, fps, window=window, seed=seed)
+        return _write_frames(output, dst, info, c, "ping_pong")
 
 
 # ---------------------------------------------------------------------------
@@ -422,9 +531,9 @@ def echo_trail(
           f"{info.width}x{info.height}")
     print(f"  {mode}, trail={trail}, buffer={delay_frames}f ({mem_mb:.0f} MB)")
 
-    frames = _load_frames(src, c)
-    output = _process_echo(frames, info.fps, delay=delay, trail=trail)
-    return _write_frames(output, dst, info, c, "echo_trail")
+    with _load_frames(src, c) as frames:
+        output = _process_echo(frames, info.fps, delay=delay, trail=trail)
+        return _write_frames(output, dst, info, c, "echo_trail")
 
 
 # ---------------------------------------------------------------------------
@@ -490,9 +599,9 @@ def time_patch(
     print(f"time_patch: {info.duration:.1f}s @ {info.fps}fps, {info.width}x{info.height}")
     print(f"  patch range={patch_min:.0%}–{patch_max:.0%}, seed={seed}")
 
-    frames = _load_frames(src, c)
-    output = _process_patch(frames, info.fps, patch_min=patch_min, patch_max=patch_max, seed=seed)
-    return _write_frames(output, dst, info, c, "time_patch")
+    with _load_frames(src, c) as frames:
+        output = _process_patch(frames, info.fps, patch_min=patch_min, patch_max=patch_max, seed=seed)
+        return _write_frames(output, dst, info, c, "time_patch")
 
 
 # ---------------------------------------------------------------------------
@@ -554,16 +663,16 @@ def slit_scan(
     c = cfg or Config()
     info = probe(src, c)
 
-    frames = _load_frames(src, c)
-    n = len(frames)
+    with _load_frames(src, c) as frames:
+        n = len(frames)
 
-    print(f"slit_scan: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
-    print(f"  axis={axis}, scan_speed={scan_speed}")
-    mem_mb = n * info.width * info.height * 3 / 1e6
-    print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
+        print(f"slit_scan: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  axis={axis}, scan_speed={scan_speed}")
+        mem_mb = n * info.width * info.height * 3 / 1e6
+        print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
-    output = _process_slit_scan(frames, info.fps, axis=axis, scan_speed=scan_speed, seed=seed)
-    return _write_frames(output, dst, info, c, "slit_scan")
+        output = _process_slit_scan(frames, info.fps, axis=axis, scan_speed=scan_speed, seed=seed)
+        return _write_frames(output, dst, info, c, "slit_scan")
 
 
 # ---------------------------------------------------------------------------
@@ -625,16 +734,16 @@ def temporal_tile(
     c = cfg or Config()
     info = probe(src, c)
 
-    frames = _load_frames(src, c)
-    n = len(frames)
+    with _load_frames(src, c) as frames:
+        n = len(frames)
 
-    print(f"temporal_tile: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
-    print(f"  grid={grid}x{grid}, offset_scale={offset_scale}")
-    mem_mb = n * info.width * info.height * 3 / 1e6
-    print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
+        print(f"temporal_tile: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  grid={grid}x{grid}, offset_scale={offset_scale}")
+        mem_mb = n * info.width * info.height * 3 / 1e6
+        print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
-    output = _process_temporal_tile(frames, info.fps, grid=grid, offset_scale=offset_scale, seed=seed)
-    return _write_frames(output, dst, info, c, "temporal_tile")
+        output = _process_temporal_tile(frames, info.fps, grid=grid, offset_scale=offset_scale, seed=seed)
+        return _write_frames(output, dst, info, c, "temporal_tile")
 
 
 # ---------------------------------------------------------------------------
@@ -751,19 +860,19 @@ def quad_loop(
     c = cfg or Config()
     info = probe(src, c)
 
-    frames = _load_frames(src, c)
-    n = len(frames)
+    with _load_frames(src, c) as frames:
+        n = len(frames)
 
-    print(f"quad_loop: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
-    print(f"  layout={layout}, loop_dur={loop_dur:.2f}s, offset_scale={offset_scale:.2f}")
-    mem_mb = n * info.width * info.height * 3 / 1e6
-    print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
+        print(f"quad_loop: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  layout={layout}, loop_dur={loop_dur:.2f}s, offset_scale={offset_scale:.2f}")
+        mem_mb = n * info.width * info.height * 3 / 1e6
+        print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
-    output = _process_quad_loop(
-        frames, info.fps, loop_dur=loop_dur, offset_scale=offset_scale,
-        layout=layout, seed=seed,
-    )
-    return _write_frames(output, dst, info, c, "quad_loop")
+        output = _process_quad_loop(
+            frames, info.fps, loop_dur=loop_dur, offset_scale=offset_scale,
+            layout=layout, seed=seed,
+        )
+        return _write_frames(output, dst, info, c, "quad_loop")
 
 
 # ---------------------------------------------------------------------------
@@ -821,9 +930,9 @@ def smear(
     print(f"smear: {info.duration:.1f}s @ {info.fps}fps, {info.width}x{info.height}")
     print(f"  threshold={threshold}")
 
-    frames = _load_frames(src, c)
-    output = _process_smear(frames, info.fps, threshold=threshold)
-    return _write_frames(output, dst, info, c, "smear")
+    with _load_frames(src, c) as frames:
+        output = _process_smear(frames, info.fps, threshold=threshold)
+        return _write_frames(output, dst, info, c, "smear")
 
 
 # ---------------------------------------------------------------------------
@@ -878,9 +987,9 @@ def bloom(
     print(f"bloom: {info.duration:.1f}s @ {info.fps}fps, {info.width}x{info.height}")
     print(f"  sensitivity={sensitivity}, gain={1.0 / max(sensitivity, 0.01):.1f}x")
 
-    frames = _load_frames(src, c)
-    output = _process_bloom(frames, info.fps, sensitivity=sensitivity)
-    return _write_frames(output, dst, info, c, "bloom")
+    with _load_frames(src, c) as frames:
+        output = _process_bloom(frames, info.fps, sensitivity=sensitivity)
+        return _write_frames(output, dst, info, c, "bloom")
 
 
 # ---------------------------------------------------------------------------
@@ -939,9 +1048,9 @@ def frame_stack(
     mem_mb = window * info.width * info.height * 3 / 1e6
     print(f"  window={window} frames, mode={mode} ({mem_mb:.0f} MB buffer)")
 
-    frames = _load_frames(src, c)
-    output = _process_frame_stack(frames, info.fps, window=window, mode=mode)
-    return _write_frames(output, dst, info, c, "frame_stack")
+    with _load_frames(src, c) as frames:
+        output = _process_frame_stack(frames, info.fps, window=window, mode=mode)
+        return _write_frames(output, dst, info, c, "frame_stack")
 
 
 # ---------------------------------------------------------------------------
@@ -1011,16 +1120,16 @@ def slip(
     c = cfg or Config()
     info = probe(src, c)
 
-    frames = _load_frames(src, c)
-    n = len(frames)
+    with _load_frames(src, c) as frames:
+        n = len(frames)
 
-    print(f"slip: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
-    print(f"  {n_bands} bands ({axis}), max_slip={max_slip}")
-    mem_mb = n * info.width * info.height * 3 / 1e6
-    print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
+        print(f"slip: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  {n_bands} bands ({axis}), max_slip={max_slip}")
+        mem_mb = n * info.width * info.height * 3 / 1e6
+        print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
-    output = _process_slip(frames, info.fps, n_bands=n_bands, max_slip=max_slip, axis=axis, seed=seed)
-    return _write_frames(output, dst, info, c, "slip")
+        output = _process_slip(frames, info.fps, n_bands=n_bands, max_slip=max_slip, axis=axis, seed=seed)
+        return _write_frames(output, dst, info, c, "slip")
 
 
 # ---------------------------------------------------------------------------
@@ -1101,9 +1210,9 @@ def flow_warp(
     print(f"flow_warp: {info.duration:.1f}s @ {info.fps}fps, {info.width}x{info.height}")
     print(f"  amplify={amplify}, smooth={smooth}")
 
-    frames = _load_frames(src, c)
-    output = _process_flow_warp(frames, info.fps, amplify=amplify, smooth=smooth, seed=seed)
-    return _write_frames(output, dst, info, c, "flow_warp")
+    with _load_frames(src, c) as frames:
+        output = _process_flow_warp(frames, info.fps, amplify=amplify, smooth=smooth, seed=seed)
+        return _write_frames(output, dst, info, c, "flow_warp")
 
 
 # ---------------------------------------------------------------------------
@@ -1176,20 +1285,20 @@ def temporal_sort(
     c = cfg or Config()
     info = probe(src, c)
 
-    frames = _load_frames(src, c)
-    n = len(frames)
+    with _load_frames(src, c) as frames:
+        n = len(frames)
 
-    print(f"temporal_sort: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
-    print(f"  mode={mode}, direction={direction}")
-    mem_mb = n * info.width * info.height * 3 / 1e6
-    print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
+        print(f"temporal_sort: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  mode={mode}, direction={direction}")
+        mem_mb = n * info.width * info.height * 3 / 1e6
+        print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
-    t0 = _time.monotonic()
-    output = _process_temporal_sort(frames, info.fps, mode=mode, direction=direction, seed=seed)
-    sort_elapsed = _time.monotonic() - t0
-    print(f"  sorted in {sort_elapsed:.1f}s")
+        t0 = _time.monotonic()
+        output = _process_temporal_sort(frames, info.fps, mode=mode, direction=direction, seed=seed)
+        sort_elapsed = _time.monotonic() - t0
+        print(f"  sorted in {sort_elapsed:.1f}s")
 
-    return _write_frames(output, dst, info, c, "temporal_sort")
+        return _write_frames(output, dst, info, c, "temporal_sort")
 
 
 # ---------------------------------------------------------------------------
@@ -1274,9 +1383,9 @@ def extrema_hold(
           f"{info.width}x{info.height}")
     print(f"  mode={mode}, decay={decay}")
 
-    frames = _load_frames(src, c)
-    output = _process_extrema_hold(frames, info.fps, mode=mode, decay=decay, seed=seed)
-    return _write_frames(output, dst, info, c, "extrema_hold")
+    with _load_frames(src, c) as frames:
+        output = _process_extrema_hold(frames, info.fps, mode=mode, decay=decay, seed=seed)
+        return _write_frames(output, dst, info, c, "extrema_hold")
 
 
 # ---------------------------------------------------------------------------
@@ -1378,11 +1487,134 @@ def feedback_transform(
           f"{info.width}x{info.height}")
     print(f"  transform={transform}, amount={amount}, mix={mix}")
 
-    frames = _load_frames(src, c)
-    output = _process_feedback_transform(
-        frames, info.fps, transform=transform, amount=amount, mix=mix, seed=seed,
-    )
-    return _write_frames(output, dst, info, c, "feedback_transform")
+    with _load_frames(src, c) as frames:
+        output = _process_feedback_transform(
+            frames, info.fps, transform=transform, amount=amount, mix=mix, seed=seed,
+        )
+        return _write_frames(output, dst, info, c, "feedback_transform")
+
+
+# ---------------------------------------------------------------------------
+# Scan refresh — CRT phosphor beam effect
+# ---------------------------------------------------------------------------
+
+def _process_scan_refresh(
+    frames,
+    fps: float,
+    *,
+    speed: float = 0.5,
+    decay: float = 3.0,
+    beam_width: float = 0.02,
+    axis: str = "horizontal",
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """CRT phosphor scan refresh — beam sweeps across frame, refreshing
+    content as it passes. Behind the beam, phosphor decays toward black.
+
+    Streaming: only needs a phosphor buffer + current frame.
+
+    speed:      beam sweep rate in cycles per second (full sweeps).
+    decay:      phosphor decay rate. Higher = faster fade, tighter trail.
+                ~2.0 = long slow glow, ~5.0 = tight bright band, ~10.0 = razor.
+    beam_width: fraction of the scan dimension refreshed per pass (0-1).
+                0.02 = thin line, 0.1 = wide band.
+    axis:       "horizontal" = top-to-bottom scan, "vertical" = left-to-right.
+    """
+    n = len(frames)
+    if n == 0:
+        return []
+
+    h, w = frames[0].shape[:2]
+    scan_dim = h if axis == "horizontal" else w
+    beam_px = max(1, int(beam_width * scan_dim))
+
+    # Phosphor buffer starts black
+    phosphor = np.zeros((h, w, 3), dtype=np.float32)
+    output = []
+    prev_pos = 0.0
+
+    for t in range(n):
+        current = frames[t].astype(np.float32)
+
+        # Beam position: cycles through scan dimension
+        scan_pos = (t * speed * scan_dim / fps) % scan_dim
+
+        # Refresh all lines/cols the beam has swept since last frame.
+        # This closes gaps when the beam advances faster than beam_width.
+        if t == 0:
+            write_start = int(scan_pos)
+            write_end = int(scan_pos) + beam_px
+        else:
+            write_start = int(prev_pos)
+            write_end = int(scan_pos) + beam_px
+            # Handle wrap-around: if beam crossed the boundary, extend end
+            if scan_pos < prev_pos:
+                write_end += scan_dim
+
+        if axis == "horizontal":
+            for idx in range(write_start, write_end):
+                row = idx % scan_dim
+                phosphor[row] = current[row]
+        else:
+            for idx in range(write_start, write_end):
+                col = idx % scan_dim
+                phosphor[:, col] = current[:, col]
+
+        prev_pos = scan_pos
+
+        # Build a per-row (or per-col) decay mask based on distance from beam
+        coords = np.arange(scan_dim, dtype=np.float32)
+        # Distance behind the beam (wrapping). 0 = at beam, scan_dim = furthest.
+        dist = (scan_pos - coords) % scan_dim
+        # Decay factor: 1.0 at beam, exponential fall-off behind
+        fade = np.exp(-decay * dist / scan_dim)
+
+        if axis == "horizontal":
+            mask = fade[:, np.newaxis, np.newaxis]
+        else:
+            mask = fade[np.newaxis, :, np.newaxis]
+
+        result = phosphor * mask
+        output.append(np.clip(result, 0, 255).astype(np.uint8))
+
+    return output
+
+
+@task(name="scan-refresh", tags=["ram-heavy"])
+def scan_refresh(
+    src: Path,
+    dst: Path,
+    *,
+    speed: float = 0.5,
+    decay: float = 3.0,
+    beam_width: float = 0.02,
+    axis: str = "horizontal",
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """CRT phosphor scan refresh effect.
+
+    A beam sweeps across the frame. Where it passes, the current frame
+    content is written to a phosphor buffer. Behind the beam, the phosphor
+    decays toward black — creating a glowing trail of progressively older
+    content fading away.
+
+    Streaming: phosphor buffer + current frame only.
+    Output is the same duration as input.
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+
+    print(f"scan_refresh: {info.duration:.1f}s @ {info.fps}fps, "
+          f"{info.width}x{info.height}")
+    print(f"  speed={speed}, decay={decay}, beam_width={beam_width}, axis={axis}")
+
+    with _load_frames(src, c) as frames:
+        output = _process_scan_refresh(
+            frames, info.fps, speed=speed, decay=decay,
+            beam_width=beam_width, axis=axis, seed=seed,
+        )
+        return _write_frames(output, dst, info, c, "scan_refresh")
 
 
 # ---------------------------------------------------------------------------
@@ -1402,6 +1634,7 @@ def _apply_time_effect(
         SlitScanStep, TemporalTileStep, QuadLoopStep,
         SmearStep, BloomStep, StackStep, SlipStep,
         FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
+        ScanRefreshStep,
     )
     match step:
         case ScrubStep(smoothness=smoothness, intensity=intensity):
@@ -1436,6 +1669,8 @@ def _apply_time_effect(
             return _process_extrema_hold(frames, fps, mode=mode, decay=decay, seed=seed)
         case FeedbackTransformStep(transform=xform, amount=amount, mix=mix_val):
             return _process_feedback_transform(frames, fps, transform=xform, amount=amount, mix=mix_val, seed=seed)
+        case ScanRefreshStep(speed=speed, decay=decay, beam_width=beam_width, axis=axis):
+            return _process_scan_refresh(frames, fps, speed=speed, decay=decay, beam_width=beam_width, axis=axis, seed=seed)
         case _:
             raise ValueError(f"Not a time effect step: {type(step).__name__}")
 
@@ -1466,18 +1701,27 @@ def fused_time_chain(
     print(f"fused_time_chain: {n_effects} effects on {len(frames)} frames "
           f"({info.duration:.1f}s @ {fps:.0f}fps)")
 
-    t0 = _time.monotonic()
-    for i, (step, seed) in enumerate(steps):
-        step_name = type(step).__name__.replace("Step", "").lower()
-        logger.info("  [%d/%d] %s ...", i + 1, n_effects, step_name)
-        step_t0 = _time.monotonic()
+    try:
+        t0 = _time.monotonic()
+        for i, (step, seed) in enumerate(steps):
+            step_name = type(step).__name__.replace("Step", "").lower()
+            logger.info("  [%d/%d] %s ...", i + 1, n_effects, step_name)
+            step_t0 = _time.monotonic()
 
-        frames = _apply_time_effect(frames, step, fps, seed)
+            result = _apply_time_effect(frames, step, fps, seed)
+            # Clean up the FrameBuffer after first effect; subsequent
+            # iterations frames is a plain list, cleanup() is a no-op check.
+            if isinstance(frames, FrameBuffer):
+                frames.cleanup()
+            frames = result  # now list[np.ndarray]
 
-        step_elapsed = _time.monotonic() - step_t0
-        print(f"  [{i + 1}/{n_effects}] {step_name} done ({step_elapsed:.1f}s, {len(frames)} frames)")
+            step_elapsed = _time.monotonic() - step_t0
+            print(f"  [{i + 1}/{n_effects}] {step_name} done ({step_elapsed:.1f}s, {len(frames)} frames)")
 
-    total_elapsed = _time.monotonic() - t0
-    print(f"  all effects in {total_elapsed:.1f}s")
+        total_elapsed = _time.monotonic() - t0
+        print(f"  all effects in {total_elapsed:.1f}s")
 
-    return _write_frames(frames, dst, info, c, "fused_time_chain")
+        return _write_frames(frames, dst, info, c, "fused_time_chain")
+    finally:
+        if isinstance(frames, FrameBuffer):
+            frames.cleanup()

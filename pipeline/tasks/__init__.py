@@ -21,7 +21,7 @@ from .glitch import bitrate_crush
 from .time import (
     time_scrub, drift_loop, ping_pong, echo_trail, time_patch,
     slit_scan, temporal_tile, quad_loop, smear, bloom, frame_stack, slip, flow_warp,
-    temporal_sort, extrema_hold, feedback_transform,
+    temporal_sort, extrema_hold, feedback_transform, scan_refresh,
     fused_time_chain,
 )
 from .transition import (
