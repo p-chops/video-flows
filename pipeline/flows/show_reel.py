@@ -214,6 +214,8 @@ def _plan_shows(
         "output": str(out_path),
         "shows": shows,
     }
+    if archetype:
+        manifest["archetype"] = archetype
     return manifest
 
 
@@ -456,9 +458,6 @@ def show_reel(
         src=src, footage_ratio=footage_ratio, seed=seed,
         archetype=archetype, output=output, cfg=c,
     )
-    # Stash archetype in manifest so reroll can use it
-    if archetype:
-        manifest["archetype"] = archetype
     # Save manifest alongside the run for reproducibility
     manifest_path = c.work_dir / f"reel_{seed}_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str) + "\n")
@@ -520,6 +519,8 @@ def show_reel_batch(
             src=src, footage_ratio=footage_ratio, seed=reel_seed,
             archetype=archetype, output=out_path, cfg=c,
         )
+        if archetype:
+            manifest["archetype"] = archetype
         result = show_reel_render(
             manifest, cfg=c, cleanup=cleanup,
             motion_floor=motion_floor, max_reroll=max_reroll,
