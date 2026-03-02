@@ -1236,14 +1236,22 @@ def _composite_lanes(
                     bw = band_w if i < n_lanes - 1 else w - x0
                     regions.append((0, x0, h, bw))
 
-            # Crop each lane's band from its own frames (no resize)
+            # Center-crop each lane into its band
             streams = [read_frames(lp, cfg) for lp in lane_paths]
             with FrameWriter(out, base_info, cfg=cfg) as writer:
                 for frames in zip(*streams):
                     out_frame = np.empty((h, w, 3), dtype=np.uint8)
                     for i, (y0, x0, bh, bw) in enumerate(regions):
-                        out_frame[y0:y0 + bh, x0:x0 + bw] = \
-                            frames[i][y0:y0 + bh, x0:x0 + bw]
+                        if layout == "horizontal":
+                            # Center-crop vertically from each lane
+                            crop_y0 = (h - bh) // 2
+                            out_frame[y0:y0 + bh, :] = \
+                                frames[i][crop_y0:crop_y0 + bh, :]
+                        else:
+                            # Center-crop horizontally from each lane
+                            crop_x0 = (w - bw) // 2
+                            out_frame[:, x0:x0 + bw] = \
+                                frames[i][:, crop_x0:crop_x0 + bw]
                     writer.write(out_frame)
 
         case RandomComposite():

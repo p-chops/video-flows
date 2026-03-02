@@ -692,12 +692,26 @@ def _process_quad_loop(
             (0, band_w * 3, h, w - band_w * 3),
         ]
 
-    # Pre-resize source frames for each quadrant size
-    quad_resized: list[list[np.ndarray]] = []
-    for q_idx, (y0, x0, qh, qw) in enumerate(regions):
-        resized = [cv2.resize(frame, (qw, qh), interpolation=cv2.INTER_AREA)
-                   for frame in frames]
-        quad_resized.append(resized)
+    # Pre-process source frames for each quadrant/band
+    quad_prepared: list[list[np.ndarray]] = []
+    if layout == "grid_2x2":
+        # 2x2: resize full frame to fit each quadrant (aspect ratio preserved)
+        for q_idx, (y0, x0, qh, qw) in enumerate(regions):
+            resized = [cv2.resize(frame, (qw, qh), interpolation=cv2.INTER_AREA)
+                       for frame in frames]
+            quad_prepared.append(resized)
+    else:
+        # Band layouts: center-crop instead of squishing
+        for q_idx, (y0, x0, qh, qw) in enumerate(regions):
+            if layout == "horizontal_bands":
+                # Crop center vertical strip to band height
+                crop_y0 = (h - qh) // 2
+                cropped = [frame[crop_y0:crop_y0 + qh, :] for frame in frames]
+            else:  # vertical_bands
+                # Crop center horizontal strip to band width
+                crop_x0 = (w - qw) // 2
+                cropped = [frame[:, crop_x0:crop_x0 + qw] for frame in frames]
+            quad_prepared.append(cropped)
 
     output = []
     for out_idx in range(n):
@@ -706,7 +720,7 @@ def _process_quad_loop(
             loop_len, start = quad_loops[q_idx]
             pos = (out_idx + start) % loop_len
             src_idx = pos % n
-            out_frame[y0:y0 + qh, x0:x0 + qw] = quad_resized[q_idx][src_idx]
+            out_frame[y0:y0 + qh, x0:x0 + qw] = quad_prepared[q_idx][src_idx]
         output.append(out_frame)
     return output
 
