@@ -1509,13 +1509,18 @@ def _process_scan_refresh(
     seed: Optional[int] = None,
 ) -> list[np.ndarray]:
     """CRT phosphor scan refresh — beam sweeps across frame, refreshing
-    content as it passes. Behind the beam, phosphor decays toward black.
+    content as it passes. Behind the beam, phosphor decays exponentially.
 
-    Streaming: only needs a phosphor buffer + current frame.
+    Brightness-preserving: the beam writes pixels *boosted* above their true
+    value, and the exponential decay pulls them below it. Over one full scan
+    cycle the time-average equals the original pixel value, so mean brightness
+    is unchanged. Requires float32 phosphor buffer (values can exceed 255
+    mid-cycle before decay brings them back).
+
+    Streaming: only needs a single float32 phosphor canvas.
 
     speed:      beam sweep rate in cycles per second (full sweeps).
     decay:      phosphor decay rate. Higher = faster fade, tighter trail.
-                Clamped to [0.5, 3.0] — above 3.0 the curve crushes to black.
                 ~1.0 = long slow glow, ~2.0 = medium trail, ~3.0 = tight band.
     beam_width: fraction of the scan dimension refreshed per pass (0-1).
                 0.02 = thin line, 0.1 = wide band.
@@ -1528,7 +1533,15 @@ def _process_scan_refresh(
     h, w = frames[0].shape[:2]
     scan_dim = h if axis == "horizontal" else w
     beam_px = max(1, int(beam_width * scan_dim))
-    decay = max(0.5, min(3.0, decay))
+    decay = max(0.1, decay)  # avoid divide-by-zero
+
+    # ── Brightness-preserving boost factor ──
+    # Fade function: exp(-decay * dist / scan_dim).  Over one full scan cycle
+    # dist traverses 0 → scan_dim, so total decay = exp(-decay).
+    # Time-average of V * boost * exp(-decay * x) for x ∈ [0,1):
+    #   avg = V * boost * (1 - exp(-decay)) / decay
+    # Setting avg = V:  boost = decay / (1 - exp(-decay))
+    boost = decay / (1.0 - np.exp(-decay))
 
     # Phosphor buffer starts black
     phosphor = np.zeros((h, w, 3), dtype=np.float32)
@@ -1553,14 +1566,15 @@ def _process_scan_refresh(
             if scan_pos < prev_pos:
                 write_end += scan_dim
 
+        # Write boosted pixel values at beam position
         if axis == "horizontal":
             for idx in range(write_start, write_end):
                 row = idx % scan_dim
-                phosphor[row] = current[row]
+                phosphor[row] = current[row] * boost
         else:
             for idx in range(write_start, write_end):
                 col = idx % scan_dim
-                phosphor[:, col] = current[:, col]
+                phosphor[:, col] = current[:, col] * boost
 
         prev_pos = scan_pos
 
