@@ -1986,6 +1986,7 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
         SlitScanStep, TemporalTileStep, QuadLoopStep,
         StackStep, SlipStep,
         FlowWarpStep, TemporalSortStep, FeedbackTransformStep,
+        ScanRefreshStep,
     ])
     if cls is ScrubStep:
         return ScrubStep(
@@ -2057,6 +2058,13 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
             loop_dur=rng.uniform(1.0, 3.0),
             offset_scale=rng.uniform(0.2, 0.8),
             layout=rng.choice(["grid_2x2", "horizontal_bands", "vertical_bands"]),
+        )
+    elif cls is ScanRefreshStep:
+        return ScanRefreshStep(
+            speed=rng.uniform(0.2, 1.0 + complexity * 1.5),
+            decay=rng.uniform(1.5, 5.0 + complexity * 5.0),
+            beam_width=rng.uniform(0.01, 0.08),
+            axis=rng.choice(["horizontal", "vertical"]),
         )
     else:  # FlowWarpStep
         return FlowWarpStep(
@@ -2687,6 +2695,7 @@ _TIME_EFFECT_TYPES: dict[str, type] = {
     "stack": StackStep,
     "temporal_sort": TemporalSortStep,
     "quad_loop": QuadLoopStep,
+    "scan_refresh": ScanRefreshStep,
 }
 
 

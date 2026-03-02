@@ -1566,8 +1566,13 @@ def _process_scan_refresh(
         coords = np.arange(scan_dim, dtype=np.float32)
         # Distance behind the beam (wrapping). 0 = at beam, scan_dim = furthest.
         dist = (scan_pos - coords) % scan_dim
-        # Decay factor: 1.0 at beam, exponential fall-off behind
+        # Decay factor: 1.0 at beam, exponential fall-off behind.
+        # Floor at 0.35 so decayed regions retain visible phosphor glow.
+        # Without this, scan_refresh drives average brightness below the
+        # quality gate threshold (~0.08) and triggers rerolls.  Beam is
+        # still ~3x brighter than the floor so the sweep reads clearly.
         fade = np.exp(-decay * dist / scan_dim)
+        np.maximum(fade, 0.35, out=fade)
 
         if axis == "horizontal":
             mask = fade[:, np.newaxis, np.newaxis]

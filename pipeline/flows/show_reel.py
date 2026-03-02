@@ -311,7 +311,7 @@ def show_reel_render(
                 lanes = show["recipe"].get("lanes", [])
                 if lanes:
                     src_dict = lanes[0].get("source", {})
-                    src_path = src_dict.get("src")
+                    src_path = src_dict.get("path")
                     if src_path:
                         show_src = Path(src_path)
 

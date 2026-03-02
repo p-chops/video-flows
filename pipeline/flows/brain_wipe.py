@@ -608,7 +608,7 @@ _TIME_STEP_TYPES = (
 )
 
 # Time steps that don't consume a seed from the RNG in _submit_step
-_SEEDLESS_TIME_STEPS = (EchoStep, SmearStep, BloomStep, StackStep)
+_SEEDLESS_TIME_STEPS = (EchoStep, SmearStep, BloomStep, StackStep, ScanRefreshStep)
 
 
 def _group_steps(recipe_steps: list) -> list[list]:
