@@ -1515,7 +1515,8 @@ def _process_scan_refresh(
 
     speed:      beam sweep rate in cycles per second (full sweeps).
     decay:      phosphor decay rate. Higher = faster fade, tighter trail.
-                ~2.0 = long slow glow, ~5.0 = tight bright band, ~10.0 = razor.
+                Clamped to [0.5, 3.0] — above 3.0 the curve crushes to black.
+                ~1.0 = long slow glow, ~2.0 = medium trail, ~3.0 = tight band.
     beam_width: fraction of the scan dimension refreshed per pass (0-1).
                 0.02 = thin line, 0.1 = wide band.
     axis:       "horizontal" = top-to-bottom scan, "vertical" = left-to-right.
@@ -1527,6 +1528,7 @@ def _process_scan_refresh(
     h, w = frames[0].shape[:2]
     scan_dim = h if axis == "horizontal" else w
     beam_px = max(1, int(beam_width * scan_dim))
+    decay = max(0.5, min(3.0, decay))
 
     # Phosphor buffer starts black
     phosphor = np.zeros((h, w, 3), dtype=np.float32)
@@ -1567,12 +1569,7 @@ def _process_scan_refresh(
         # Distance behind the beam (wrapping). 0 = at beam, scan_dim = furthest.
         dist = (scan_pos - coords) % scan_dim
         # Decay factor: 1.0 at beam, exponential fall-off behind.
-        # Floor at 0.35 so decayed regions retain visible phosphor glow.
-        # Without this, scan_refresh drives average brightness below the
-        # quality gate threshold (~0.08) and triggers rerolls.  Beam is
-        # still ~3x brighter than the floor so the sweep reads clearly.
         fade = np.exp(-decay * dist / scan_dim)
-        np.maximum(fade, 0.35, out=fade)
 
         if axis == "horizontal":
             mask = fade[:, np.newaxis, np.newaxis]
