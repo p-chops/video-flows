@@ -226,4 +226,4 @@ Output goes to `output/` by default. Intermediate files accumulate in `work/` an
 
 ## License
 
-Private project — not currently licensed for redistribution.
+MIT License. See [LICENSE](LICENSE).

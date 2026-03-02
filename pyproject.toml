@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ulp-video-pipeline"
-version = "0.1.1"
+version = "0.1.2"
 description = "Automated video processing pipeline for the Undersea Lair Project"
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "prefect>=3.0",
