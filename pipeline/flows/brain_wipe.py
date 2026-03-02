@@ -99,6 +99,9 @@ from ..recipe import (
     QuadLoopStep,
     ScanRefreshStep,
     TemporalFFTStep,
+    TemporalGradientStep,
+    TemporalMedianStep,
+    AxisSwapStep,
     BlendComposite,
     MaskedComposite,
     RandomComposite,
@@ -147,6 +150,9 @@ from ..tasks import (
     feedback_transform,
     scan_refresh,
     temporal_fft,
+    temporal_gradient,
+    temporal_median,
+    axis_swap,
     fused_time_chain,
 )
 
@@ -607,10 +613,12 @@ _TIME_STEP_TYPES = (
     SmearStep, BloomStep, StackStep, SlipStep,
     FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
     ScanRefreshStep, TemporalFFTStep,
+    TemporalGradientStep, TemporalMedianStep, AxisSwapStep,
 )
 
 # Time steps that don't consume a seed from the RNG in _submit_step
-_SEEDLESS_TIME_STEPS = (EchoStep, SmearStep, BloomStep, StackStep, ScanRefreshStep)
+_SEEDLESS_TIME_STEPS = (EchoStep, SmearStep, BloomStep, StackStep, ScanRefreshStep,
+                        TemporalGradientStep, TemporalMedianStep, AxisSwapStep)
 
 
 def _group_steps(recipe_steps: list) -> list[list]:
@@ -833,6 +841,18 @@ def _submit_step(
             return temporal_fft.submit(
                 src, dst, filter_type=ft, cutoff_low=cl, cutoff_high=ch,
                 preserve_dc=pdc, seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case TemporalGradientStep(order=order):
+            return temporal_gradient.submit(
+                src, dst, order=order, cfg=cfg,
+            )
+        case TemporalMedianStep(window=window):
+            return temporal_median.submit(
+                src, dst, window=window, cfg=cfg,
+            )
+        case AxisSwapStep(axis=axis):
+            return axis_swap.submit(
+                src, dst, axis=axis, cfg=cfg,
             )
         case _:
             raise ValueError(f"Unknown step type: {type(step).__name__}")

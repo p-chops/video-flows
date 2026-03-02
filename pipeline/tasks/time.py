@@ -1420,6 +1420,230 @@ def temporal_fft(
 
 
 # ---------------------------------------------------------------------------
+# 14b. Temporal Gradient
+# ---------------------------------------------------------------------------
+
+def _process_temporal_gradient(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    order: int = 1,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Per-pixel temporal derivative — only motion survives.
+
+    order=1: first derivative (velocity — edges of motion).
+    order=2: second derivative (acceleration — direction changes).
+    """
+    n = len(frames)
+    if n < order + 1:
+        return list(frames)
+
+    vol = np.stack(frames, axis=0).astype(np.float32)
+
+    # np.diff along time axis, repeated for higher orders
+    diff = vol
+    for _ in range(order):
+        diff = np.diff(diff, axis=0)  # (T-order, H, W, 3)
+
+    # Shift to mid-gray (128) so negative changes are visible,
+    # then scale to use the full 0–255 range.
+    # Use robust scaling: scale by 2*std, clipped to [0, 255].
+    std = diff.std()
+    if std > 0:
+        diff = diff / (2.0 * std)  # ~95% of values in [-1, 1]
+    diff = (diff * 127.5) + 128.0
+    diff = np.clip(diff, 0, 255).astype(np.uint8)
+
+    # Pad back to original frame count by repeating first/last frames
+    result = list(diff[i] for i in range(diff.shape[0]))
+    # Pad start
+    for _ in range(order):
+        result.insert(0, result[0])
+    return result
+
+
+@task(name="temporal-gradient", tags=["ram-heavy"])
+def temporal_gradient(
+    src: Path,
+    dst: Path,
+    *,
+    order: int = 1,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Temporal gradient — per-pixel temporal derivative.
+
+    Only motion survives. Static regions go to mid-gray.
+    order=1: velocity (motion edges). order=2: acceleration (direction changes).
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+
+    with _load_frames(src, c) as frames:
+        n = len(frames)
+        print(f"temporal_gradient: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  order={order}")
+
+        t0 = _time.monotonic()
+        output = _process_temporal_gradient(frames, info.fps, order=order, seed=seed)
+        elapsed = _time.monotonic() - t0
+        print(f"  processed in {elapsed:.1f}s")
+
+        return _write_frames(output, dst, info, c, "temporal_gradient")
+
+
+# ---------------------------------------------------------------------------
+# 14c. Temporal Median
+# ---------------------------------------------------------------------------
+
+def _process_temporal_median(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    window: int = 7,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Rolling median along time axis — removes transient motion.
+
+    window: number of frames in the median kernel (must be odd).
+    Small window (3–5): softens motion while keeping structure.
+    Large window (15–31): ghost-like smear, only persistent features remain.
+    """
+    n = len(frames)
+    if n < 3:
+        return list(frames)
+
+    # Ensure odd window
+    window = max(3, window | 1)  # force odd
+    window = min(window, n)      # can't exceed frame count
+
+    vol = np.stack(frames, axis=0)  # (T, H, W, 3) uint8
+
+    # Rolling median along time axis using numpy — no scipy dependency.
+    # Pad the volume temporally with edge values, then slide a window.
+    half = window // 2
+    padded = np.pad(vol, ((half, half), (0, 0), (0, 0), (0, 0)), mode="edge")
+    # Sliding window view: (T, window, H, W, 3) — zero-copy
+    shape = (n, window) + vol.shape[1:]
+    strides = (padded.strides[0],) + padded.strides
+    windowed = np.lib.stride_tricks.as_strided(padded, shape=shape, strides=strides)
+    # Median along the window axis (axis=1)
+    filtered = np.median(windowed, axis=1).astype(np.uint8)
+
+    return [filtered[i] for i in range(n)]
+
+
+@task(name="temporal-median", tags=["ram-heavy"])
+def temporal_median(
+    src: Path,
+    dst: Path,
+    *,
+    window: int = 7,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Temporal median — rolling median along time axis.
+
+    Removes transient motion; only features persisting for window/2 frames survive.
+    window: median kernel size in frames (odd, default 7).
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+
+    with _load_frames(src, c) as frames:
+        n = len(frames)
+        print(f"temporal_median: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  window={window}")
+
+        t0 = _time.monotonic()
+        output = _process_temporal_median(frames, info.fps, window=window, seed=seed)
+        elapsed = _time.monotonic() - t0
+        print(f"  processed in {elapsed:.1f}s")
+
+        return _write_frames(output, dst, info, c, "temporal_median")
+
+
+# ---------------------------------------------------------------------------
+# 14d. Axis Swap
+# ---------------------------------------------------------------------------
+
+def _process_axis_swap(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    axis: str = "horizontal",
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Swap time axis with spatial axis — view the volume from the side.
+
+    axis="horizontal": swap T↔X. Each output frame is a temporal cross-section
+        at a different x-position. Horizontal axis shows timeline.
+    axis="vertical": swap T↔Y. Each output frame is a temporal cross-section
+        at a different y-position. Vertical axis shows timeline.
+    """
+    n = len(frames)
+    if n < 2:
+        return list(frames)
+
+    H, W = frames[0].shape[:2]
+    vol = np.stack(frames, axis=0)  # (T, H, W, 3) uint8
+    T = n
+
+    output = np.empty_like(vol)  # (T, H, W, 3)
+
+    if axis == "horizontal":
+        # Swap T↔X: output[t, y, x] = vol[x_to_t[x], y, t_to_x[t]]
+        t_to_x = np.round(np.linspace(0, W - 1, T)).astype(np.intp)
+        x_to_t = np.round(np.linspace(0, T - 1, W)).astype(np.intp)
+        for t in range(T):
+            col = t_to_x[t]
+            # vol[x_to_t, :, col, :] → (W, H, 3), transpose to (H, W, 3)
+            output[t] = vol[x_to_t, :, col, :].transpose(1, 0, 2)
+    else:
+        # Swap T↔Y: output[t, y, x] = vol[y_to_t[y], t_to_y[t], x]
+        t_to_y = np.round(np.linspace(0, H - 1, T)).astype(np.intp)
+        y_to_t = np.round(np.linspace(0, T - 1, H)).astype(np.intp)
+        for t in range(T):
+            row = t_to_y[t]
+            # vol[y_to_t, row, :, :] → (H, W, 3) — directly correct shape
+            output[t] = vol[y_to_t, row, :, :]
+
+    return [output[i] for i in range(T)]
+
+
+@task(name="axis-swap", tags=["ram-heavy"])
+def axis_swap(
+    src: Path,
+    dst: Path,
+    *,
+    axis: str = "horizontal",
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Axis swap — view the frame volume from the side.
+
+    Swaps the time axis with a spatial axis. Each output frame shows what used
+    to be a spatial cross-section, with time stretched across the frame.
+    axis: "horizontal" (swap T↔X) or "vertical" (swap T↔Y).
+    """
+    c = cfg or Config()
+    info = probe(src, c)
+
+    with _load_frames(src, c) as frames:
+        n = len(frames)
+        print(f"axis_swap: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  axis={axis}")
+
+        t0 = _time.monotonic()
+        output = _process_axis_swap(frames, info.fps, axis=axis, seed=seed)
+        elapsed = _time.monotonic() - t0
+        print(f"  processed in {elapsed:.1f}s")
+
+        return _write_frames(output, dst, info, c, "axis_swap")
+
+
+# ---------------------------------------------------------------------------
 # 15. Extrema Hold
 # ---------------------------------------------------------------------------
 
@@ -1769,6 +1993,7 @@ def _apply_time_effect(
         SmearStep, BloomStep, StackStep, SlipStep,
         FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
         ScanRefreshStep, TemporalFFTStep,
+        TemporalGradientStep, TemporalMedianStep, AxisSwapStep,
     )
     match step:
         case ScrubStep(smoothness=smoothness, intensity=intensity):
@@ -1810,6 +2035,12 @@ def _apply_time_effect(
             return _process_temporal_fft(frames, fps, filter_type=ft,
                                          cutoff_low=cl, cutoff_high=ch,
                                          preserve_dc=pdc, seed=seed)
+        case TemporalGradientStep(order=order):
+            return _process_temporal_gradient(frames, fps, order=order, seed=seed)
+        case TemporalMedianStep(window=window):
+            return _process_temporal_median(frames, fps, window=window, seed=seed)
+        case AxisSwapStep(axis=axis):
+            return _process_axis_swap(frames, fps, axis=axis, seed=seed)
         case _:
             raise ValueError(f"Not a time effect step: {type(step).__name__}")
 

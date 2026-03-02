@@ -32,7 +32,10 @@ from typing import Optional
 from prefect import flow
 
 from ..config import Config
-from ..tasks.time import drift_loop, echo_trail, ping_pong, time_patch, time_scrub, temporal_fft
+from ..tasks.time import (
+    drift_loop, echo_trail, ping_pong, time_patch, time_scrub, temporal_fft,
+    temporal_gradient, temporal_median, axis_swap,
+)
 
 
 # ─── Flows ────────────────────────────────────────────────────────────────────
@@ -138,6 +141,51 @@ def time_lab_temporal_fft(
                         seed=seed, cfg=c)
 
 
+@flow(name="time-lab-temporal-gradient", log_prints=True)
+def time_lab_temporal_gradient(
+    src: Path,
+    output: Optional[Path] = None,
+    order: int = 1,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Temporal gradient — per-pixel temporal derivative."""
+    c = cfg or Config()
+    c.ensure_dirs()
+    out = output or c.output_dir / "temporal_gradient.mp4"
+    return temporal_gradient(src, out, order=order, seed=seed, cfg=c)
+
+
+@flow(name="time-lab-temporal-median", log_prints=True)
+def time_lab_temporal_median(
+    src: Path,
+    output: Optional[Path] = None,
+    window: int = 7,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Temporal median — rolling median removes transient motion."""
+    c = cfg or Config()
+    c.ensure_dirs()
+    out = output or c.output_dir / "temporal_median.mp4"
+    return temporal_median(src, out, window=window, seed=seed, cfg=c)
+
+
+@flow(name="time-lab-axis-swap", log_prints=True)
+def time_lab_axis_swap(
+    src: Path,
+    output: Optional[Path] = None,
+    axis: str = "horizontal",
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Axis swap — view the frame volume from the side."""
+    c = cfg or Config()
+    c.ensure_dirs()
+    out = output or c.output_dir / "axis_swap.mp4"
+    return axis_swap(src, out, axis=axis, seed=seed, cfg=c)
+
+
 # Keep backward-compatible alias
 time_lab = time_lab_scrub
 
@@ -237,6 +285,43 @@ def _cli():
     p_fft.add_argument("--seed", type=int, default=None,
                        help="Random seed for reproducibility")
 
+    # --- temporal-gradient ---
+    p_grad = sub.add_parser("temporal-gradient",
+                            help="Temporal gradient — motion-only output")
+    p_grad.add_argument("src", type=Path,
+                        help="Source video file")
+    p_grad.add_argument("-o", "--output", type=Path, default=None,
+                        help="Output path (default: output/temporal_gradient.mp4)")
+    p_grad.add_argument("--order", type=int, default=1, choices=[1, 2],
+                        help="Derivative order: 1=velocity, 2=acceleration (default: 1)")
+    p_grad.add_argument("--seed", type=int, default=None,
+                        help="Random seed for reproducibility")
+
+    # --- temporal-median ---
+    p_med = sub.add_parser("temporal-median",
+                           help="Temporal median — removes transient motion")
+    p_med.add_argument("src", type=Path,
+                       help="Source video file")
+    p_med.add_argument("-o", "--output", type=Path, default=None,
+                       help="Output path (default: output/temporal_median.mp4)")
+    p_med.add_argument("--window", type=int, default=7,
+                       help="Median kernel size in frames, odd (default: 7)")
+    p_med.add_argument("--seed", type=int, default=None,
+                       help="Random seed for reproducibility")
+
+    # --- axis-swap ---
+    p_swap = sub.add_parser("axis-swap",
+                            help="Axis swap — view volume from the side")
+    p_swap.add_argument("src", type=Path,
+                        help="Source video file")
+    p_swap.add_argument("-o", "--output", type=Path, default=None,
+                        help="Output path (default: output/axis_swap.mp4)")
+    p_swap.add_argument("--axis", type=str, default="horizontal",
+                        choices=["horizontal", "vertical"],
+                        help="Which axis to swap with time (default: horizontal)")
+    p_swap.add_argument("--seed", type=int, default=None,
+                        help="Random seed for reproducibility")
+
     args = parser.parse_args()
     cfg = Config()
     cfg.ensure_dirs()
@@ -277,6 +362,21 @@ def _cli():
             cutoff_low=args.cutoff_low, cutoff_high=args.cutoff_high,
             preserve_dc=not args.no_preserve_dc,
             seed=args.seed, cfg=cfg,
+        )
+    elif args.command == "temporal-gradient":
+        time_lab_temporal_gradient(
+            src=args.src, output=args.output,
+            order=args.order, seed=args.seed, cfg=cfg,
+        )
+    elif args.command == "temporal-median":
+        time_lab_temporal_median(
+            src=args.src, output=args.output,
+            window=args.window, seed=args.seed, cfg=cfg,
+        )
+    elif args.command == "axis-swap":
+        time_lab_axis_swap(
+            src=args.src, output=args.output,
+            axis=args.axis, seed=args.seed, cfg=cfg,
         )
 
 

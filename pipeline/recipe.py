@@ -225,12 +225,28 @@ class TemporalFFTStep:
     cutoff_high: float = 0.5       # upper bound for band_pass/notch
     preserve_dc: bool = True       # keep bin 0 to preserve average brightness
 
+@dataclass
+class TemporalGradientStep:
+    """Temporal gradient — per-pixel temporal derivative, only motion survives."""
+    order: int = 1  # 1 = velocity, 2 = acceleration
+
+@dataclass
+class TemporalMedianStep:
+    """Temporal median — rolling median removes transient motion."""
+    window: int = 7  # median kernel size in frames (odd)
+
+@dataclass
+class AxisSwapStep:
+    """Axis swap — view frame volume from the side (swap time with space)."""
+    axis: str = "horizontal"  # "horizontal" (T↔X) or "vertical" (T↔Y)
+
 Step = (CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep
         | PingPongStep | EchoStep | PatchStep | SlitScanStep | TemporalTileStep
         | SmearStep | BloomStep | StackStep | SlipStep
         | MirrorStep | ZoomStep | InvertStep | HueShiftStep | SaturateStep
         | FlowWarpStep | TemporalSortStep | ExtremaHoldStep | FeedbackTransformStep
-        | QuadLoopStep | ScanRefreshStep | TemporalFFTStep)
+        | QuadLoopStep | ScanRefreshStep | TemporalFFTStep
+        | TemporalGradientStep | TemporalMedianStep | AxisSwapStep)
 
 
 # ─── Transitions ──────────────────────────────────────────────────────────────
@@ -605,6 +621,12 @@ def _step_to_dict(s: Step) -> dict:
             return {"type": "temporal_fft", "filter_type": s.filter_type,
                     "cutoff_low": s.cutoff_low, "cutoff_high": s.cutoff_high,
                     "preserve_dc": s.preserve_dc}
+        case TemporalGradientStep():
+            return {"type": "temporal_gradient", "order": s.order}
+        case TemporalMedianStep():
+            return {"type": "temporal_median", "window": s.window}
+        case AxisSwapStep():
+            return {"type": "axis_swap", "axis": s.axis}
         case _:
             raise ValueError(f"Unknown step type: {type(s).__name__}")
 
@@ -690,6 +712,12 @@ def _step_from_dict(d: dict) -> Step:
                                cutoff_low=d.get("cutoff_low", 0.1),
                                cutoff_high=d.get("cutoff_high", 0.5),
                                preserve_dc=d.get("preserve_dc", True))
+    elif t == "temporal_gradient":
+        return TemporalGradientStep(order=d.get("order", 1))
+    elif t == "temporal_median":
+        return TemporalMedianStep(window=d.get("window", 7))
+    elif t == "axis_swap":
+        return AxisSwapStep(axis=d.get("axis", "horizontal"))
     else:
         raise ValueError(f"Unknown step type: {t}")
 
@@ -2004,6 +2032,7 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
         StackStep, SlipStep,
         FlowWarpStep, TemporalSortStep, FeedbackTransformStep,
         ScanRefreshStep, TemporalFFTStep,
+        TemporalGradientStep, TemporalMedianStep, AxisSwapStep,
     ])
     if cls is ScrubStep:
         return ScrubStep(
@@ -2107,6 +2136,18 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
             cutoff_low=cl,
             cutoff_high=ch,
             preserve_dc=True,
+        )
+    elif cls is TemporalGradientStep:
+        return TemporalGradientStep(
+            order=rng.choice([1, 1, 1, 2]),  # bias toward 1st derivative
+        )
+    elif cls is TemporalMedianStep:
+        return TemporalMedianStep(
+            window=rng.choice([5, 7, 9, 11, 15, 21, 31]),
+        )
+    elif cls is AxisSwapStep:
+        return AxisSwapStep(
+            axis=rng.choice(["horizontal", "vertical"]),
         )
     else:  # FlowWarpStep
         return FlowWarpStep(
@@ -2739,6 +2780,9 @@ _TIME_EFFECT_TYPES: dict[str, type] = {
     "quad_loop": QuadLoopStep,
     "scan_refresh": ScanRefreshStep,
     "temporal_fft": TemporalFFTStep,
+    "temporal_gradient": TemporalGradientStep,
+    "temporal_median": TemporalMedianStep,
+    "axis_swap": AxisSwapStep,
 }
 
 
