@@ -254,8 +254,32 @@ def show_reel_render(
     rng = random.Random(reel_seed)
 
     print(f"═══ Rendering Show Reel (seed={reel_seed}, {len(shows)} shows) ═══")
-    if motion_floor > 0:
-        print(f"    stasis detection: motion_floor={motion_floor}, max_reroll={max_reroll}")
+
+    from ..tasks.color import probe_quality, should_reroll, QualityThresholds
+    thresholds = QualityThresholds(motion_floor=motion_floor)
+    quality_log = c.work_dir / "quality_log.jsonl"
+
+    print(f"    quality gate: motion_floor={thresholds.motion_floor}, "
+          f"max_reroll={max_reroll}")
+
+    def _log_quality(
+        show: dict, report, outcome: str, reason: str, attempt: int,
+    ) -> None:
+        """Append one JSONL row to the quality log for training data."""
+        import json as _json
+        row = {
+            "seed": show["seed"],
+            "index": show["index"],
+            "kind": show.get("kind", "unknown"),
+            "complexity": show.get("complexity", 0),
+            "archetype": show.get("archetype") or archetype_hint,
+            "features": report.to_dict(),
+            "outcome": outcome,
+            "reason": reason,
+            "attempt": attempt,
+        }
+        with open(quality_log, "a") as f:
+            f.write(_json.dumps(row) + "\n")
 
     def _render_show(show: dict, attempt: int = 0) -> Path:
         idx = show["index"]
@@ -269,71 +293,73 @@ def show_reel_render(
               f"complexity={show['complexity']:.2f}, {show['duration']:.1f}s)...")
         result = brain_wipe(recipe, output=show_path, cfg=c, cleanup=True)
 
-        # Brightness floor — stretch dark shows so the reel stays watchable.
-        from ..tasks.color import _probe_brightness
-        avg = _probe_brightness(result, c)
-        if avg < 0.15:
-            import subprocess
-            lifted = work / f"show_{idx:03d}_lifted.mp4"
-            subprocess.run([
-                c.ffmpeg_bin, "-y", "-loglevel", c.ffmpeg_loglevel,
-                "-i", str(result),
-                "-vf", "normalize=independence=0:smoothing=10:strength=0.8",
-                "-an",
-                *c.encode_args(),
-                str(lifted),
-            ], check=True)
-            result.unlink()
-            lifted.rename(result)
-            result = show_path
-            print(f"    brightness floor: avg={avg:.2f} → normalized")
+        # Unified quality gate — single decode pass for all metrics.
+        report = probe_quality(result, c)
+        reroll, reason, fixable = should_reroll(report, thresholds)
+        print(f"    quality: {report.summary()}")
 
-        # Motion floor — detect stasis and reroll with a new seed.
-        if motion_floor > 0 and attempt < max_reroll:
-            from ..tasks.color import _probe_motion
-            motion = _probe_motion(result, c)
-            if motion < motion_floor:
-                new_seed = show["seed"] + attempt + 1
-                print(f"    stasis detected (motion={motion:.4f}), "
-                      f"rerolling show {idx:03d} with seed={new_seed}...")
+        if reroll and attempt < max_reroll:
+            _log_quality(show, report, "rerolled", reason, attempt)
+            print(f"    REROLL: {reason}")
 
-                # Clean up the stasis clip
-                if result.exists():
-                    result.unlink()
+            if result.exists():
+                result.unlink()
 
-                # Reconstruct source path for recipe generation
-                show_src = None
-                if show["kind"] == "footage":
-                    lanes = show["recipe"].get("lanes", [])
-                    if lanes:
-                        src_dict = lanes[0].get("source", {})
-                        src_path = src_dict.get("src")
-                        if src_path:
-                            show_src = Path(src_path)
+            # Reconstruct source path for recipe generation
+            show_src = None
+            if show["kind"] == "footage":
+                lanes = show["recipe"].get("lanes", [])
+                if lanes:
+                    src_dict = lanes[0].get("source", {})
+                    src_path = src_dict.get("src")
+                    if src_path:
+                        show_src = Path(src_path)
 
-                reroll_rng = random.Random(new_seed)
-                new_recipe = random_recipe(
-                    src=show_src,
-                    complexity=show["complexity"],
-                    target_dur=show["duration"],
-                    use_generators=(show["kind"] != "footage"),
-                    n_segments=1,
-                    use_transitions=False,
-                    seed=new_seed,
-                    archetype=archetype_hint,
-                )
-                new_recipe.width = width
-                new_recipe.height = height
-                _fixup_recipe_sources(new_recipe, show["duration"], reroll_rng)
+            new_seed = show["seed"] + attempt + 1
+            reroll_rng = random.Random(new_seed)
+            new_recipe = random_recipe(
+                src=show_src,
+                complexity=show["complexity"],
+                target_dur=show["duration"],
+                use_generators=(show["kind"] != "footage"),
+                n_segments=1,
+                use_transitions=False,
+                seed=new_seed,
+                archetype=archetype_hint,
+            )
+            new_recipe.width = width
+            new_recipe.height = height
+            _fixup_recipe_sources(new_recipe, show["duration"], reroll_rng)
 
-                new_show = dict(
-                    show,
-                    seed=new_seed,
-                    recipe=recipe_to_dict(new_recipe),
-                )
-                return _render_show(new_show, attempt=attempt + 1)
+            new_show = dict(
+                show,
+                seed=new_seed,
+                recipe=recipe_to_dict(new_recipe),
+            )
+            return _render_show(new_show, attempt=attempt + 1)
+        elif reroll:
+            _log_quality(show, report, "kept_exhausted", reason, attempt)
+            print(f"    quality issue ({reason}) but max rerolls reached, keeping")
+        else:
+            # Fixable — apply auto_levels brightness stretch
+            if fixable:
+                import subprocess
+                lifted = work / f"show_{idx:03d}_lifted.mp4"
+                subprocess.run([
+                    c.ffmpeg_bin, "-y", "-loglevel", c.ffmpeg_loglevel,
+                    "-i", str(result),
+                    "-vf", "normalize=independence=0:smoothing=10:strength=0.8",
+                    "-an",
+                    *c.encode_args(),
+                    str(lifted),
+                ], check=True)
+                result.unlink()
+                lifted.rename(result)
+                result = show_path
+                _log_quality(show, report, "fixed", reason, attempt)
+                print(f"    brightness fix applied (was {report.brightness:.3f})")
             else:
-                print(f"    motion check: {motion:.4f} (ok)")
+                _log_quality(show, report, "kept", reason, attempt)
 
         return result
 

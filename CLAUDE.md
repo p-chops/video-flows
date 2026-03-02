@@ -110,14 +110,25 @@ Blend modes use ffmpeg filter names mapped via `FFMPEG_BLEND_MODES` dict. Adding
 
 **New recipe step type** (from labs): Add a dataclass to `recipe.py`, add it to the `Step` union type alias, add a `case` branch in `_submit_step()` in `brain_wipe.py`. The step dataclass should have fields matching the corresponding task's parameters.
 
-## Color Tasks
+## Color Tasks & Quality Classifier
 
-`pipeline/tasks/color.py` provides two tasks and two probe utilities:
+`pipeline/tasks/color.py` provides two tasks, two legacy probes, and a unified quality classifier.
 
-- **`normalize_levels`** — percentile-based level stretch via ffmpeg's `colorlevels` filter. Clips the darkest/brightest percentiles and stretches remaining range to 0–255. Static per-pixel LUT with negligible overhead.
-- **`auto_levels`** — probe average brightness via frame sampling, compute gamma correction toward a target (default 0.45), apply via ffmpeg `eq=gamma=X`. Skips encode if no correction needed. Useful for individual clips but not ideal for show reels (tends to flatten character).
-- **`_probe_brightness(src, cfg)`** — sample N evenly-spaced frames, return average brightness in [0, 1]. Used by show reel brightness floor (< 0.15 triggers normalization).
-- **`_probe_motion(src, cfg)`** — sample N evenly-spaced consecutive frame pairs, return average mean absolute difference in [0, 1]. 0.0 = completely static. Used by show reel stasis detection (< motion_floor triggers reroll).
+**Tasks:**
+- **`normalize_levels`** — percentile-based level stretch via ffmpeg's `colorlevels` filter.
+- **`auto_levels`** — probe average brightness, apply gamma correction toward target. Skips encode if no correction needed.
+
+**Legacy probes** (still used by `auto_levels`):
+- **`_probe_brightness(src, cfg)`** — average brightness in [0, 1].
+- **`_probe_motion(src, cfg)`** — frame-pair mean absolute difference in [0, 1].
+
+**Quality classifier** (replaces ad-hoc brightness + motion checks in show reel):
+- **`QualityReport`** — dataclass with 5 features: `brightness`, `contrast`, `motion`, `temporal_variance`, `spatial_entropy`. Has `to_array()` (numpy feature vector for ML), `to_dict()` (serializable), `summary()` (log-friendly one-liner). `FEATURE_NAMES` class var defines the feature contract.
+- **`QualityThresholds`** — dataclass with per-feature floor thresholds + `brightness_fixable` for dim-but-salvageable clips. Defaults: `motion_floor=0.005`, `brightness_floor=0.08`, `contrast_floor=0.05`, `spatial_entropy_floor=0.005`, `temporal_variance_floor=0.002`, `brightness_fixable=0.15`.
+- **`probe_quality(src, cfg)`** — single-decode-pass feature extraction. Samples N evenly-spaced frames, computes all 5 features in one `read_frames()` loop. Half the decode cost of the old 2-probe approach.
+- **`should_reroll(report, thresholds)`** — rule-based quality gate returning `(reroll: bool, reason: str, fixable: bool)`. Check order: motion → brightness → contrast → entropy → temporal_variance. Three outcomes: reroll, fix (auto_levels), pass.
+
+**ML-ready design**: `QualityReport.to_array()` is the feature vector. Quality reports are logged to `work/quality_log.jsonl` (JSONL, one row per show render) with features, outcome, seed, complexity, archetype. Accumulates labeled training data automatically. To train a classifier later: load JSONL → `X = features`, `y = (outcome == "rerolled")` → fit any sklearn model → replace `should_reroll()` with `model.predict()`.
 
 ## Transition Tasks
 
@@ -345,7 +356,7 @@ python -m pipeline.flows.show_reel render output/show_reel_777_manifest.json
 
 Key parameters: `n_shows` (number of segments), `reel_dur` (target reel duration in seconds — auto-calculates `n_shows` from avg show duration), `min_dur`/`max_dur` (per-show duration range), `min_complexity`/`max_complexity` (complexity range per show), `transition_dur`, `width`/`height`, `src` (optional source footage or directory), `footage_ratio` (0.0–1.0, default 0.4), `archetype` (force all shows to use a specific archetype), `seed`. When both `n_shows` and `reel_dur` are omitted, defaults to 20 shows.
 
-**Stasis detection + automatic reroll**: After rendering each show, `_probe_motion()` measures frame-to-frame motion. If below `motion_floor` (default 0.005), the show is discarded and re-rendered with a new seed (new recipe, same complexity/duration/kind). Up to `max_reroll` attempts (default 2). CLI: `--motion-floor 0.01 --max-reroll 3`. Set `--motion-floor 0` to disable. Typical motion scores: 0.05–0.25 for healthy shows. The brightness floor (< 0.15 avg → normalize) runs before the motion check.
+**Quality gate + automatic reroll**: After rendering each show, `probe_quality()` collects 5 features (brightness, contrast, motion, temporal_variance, spatial_entropy) in a single decode pass. `should_reroll()` checks each against thresholds — failures trigger reroll (new seed, new recipe, same complexity/duration/kind), dim-but-salvageable clips get auto_levels. Up to `max_reroll` attempts (default 2). CLI: `--motion-floor 0.01 --max-reroll 3`. Quality reports are logged to `work/quality_log.jsonl` for future ML classifier training.
 
 Note: connect to persistent Prefect server via `PREFECT_API_URL=http://127.0.0.1:4200/api` for UI visibility. Without it, flows start ephemeral servers.
 

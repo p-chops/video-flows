@@ -13,7 +13,10 @@ from .composite import (
 from .mask import (
     luma_mask, edge_mask, motion_mask, chroma_mask, gradient_mask,
 )
-from .color import normalize_levels
+from .color import (
+    normalize_levels, QualityReport, QualityThresholds,
+    probe_quality, should_reroll,
+)
 from .glitch import bitrate_crush
 from .time import (
     time_scrub, drift_loop, ping_pong, echo_trail, time_patch,
