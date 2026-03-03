@@ -77,7 +77,6 @@ class ShaderStep:
     shader_paths: Optional[list[Path]] = None   # explicit list (skip random)
     n_shaders: int = 3                           # random pick count
     categories: Optional[list[str]] = None       # filter by ISF category
-    shader_dir: Optional[Path] = None            # override default shader dir
     param_overrides: Optional[dict[str, dict[str, float]]] = None  # {shader_stem: {param: val}}
 
 @dataclass
@@ -319,10 +318,6 @@ class BrainWipeRecipe:
     height: int = 1080
     fps: float = 30.0
     seed: Optional[int] = None
-    shader_dir: Optional[Path] = None           # default shader library
-    brain_wipe_dir: Path = field(
-        default_factory=lambda: Path("brain-wipe-shaders"),
-    )
 
 
 # ─── Recipe utilities ─────────────────────────────────────────────────────────
@@ -407,8 +402,6 @@ def print_recipe(recipe: BrainWipeRecipe) -> None:
     """Pretty-print a recipe to stdout."""
     print(f"═══ Brain Wipe Recipe  (seed={recipe.seed}) ═══")
     print(f"    {recipe.width}×{recipe.height} @ {recipe.fps:.0f}fps")
-    if recipe.shader_dir:
-        print(f"    shader_dir: {recipe.shader_dir}")
     print()
 
     for i, lane in enumerate(recipe.lanes):
@@ -555,8 +548,7 @@ def _step_to_dict(s: Step) -> dict:
             d = {"type": "shader",
                  "shader_paths": [str(p) for p in s.shader_paths] if s.shader_paths else None,
                  "n_shaders": s.n_shaders,
-                 "categories": s.categories,
-                 "shader_dir": str(s.shader_dir) if s.shader_dir else None}
+                 "categories": s.categories}
             if s.param_overrides:
                 d["param_overrides"] = s.param_overrides
             return d
@@ -641,7 +633,6 @@ def _step_from_dict(d: dict) -> Step:
             shader_paths=[Path(p) for p in d["shader_paths"]] if d.get("shader_paths") else None,
             n_shaders=d.get("n_shaders", 3),
             categories=d.get("categories"),
-            shader_dir=Path(d["shader_dir"]) if d.get("shader_dir") else None,
             param_overrides=d.get("param_overrides"),
         )
     elif t == "normalize":
@@ -843,8 +834,6 @@ def recipe_to_dict(recipe: BrainWipeRecipe) -> dict:
         "height": recipe.height,
         "fps": recipe.fps,
         "seed": recipe.seed,
-        "shader_dir": str(recipe.shader_dir) if recipe.shader_dir else None,
-        "brain_wipe_dir": str(recipe.brain_wipe_dir),
     }
 
 
@@ -871,8 +860,6 @@ def recipe_from_dict(d: dict) -> BrainWipeRecipe:
         height=d.get("height", 1080),
         fps=d.get("fps", 30.0),
         seed=d.get("seed"),
-        shader_dir=Path(d["shader_dir"]) if d.get("shader_dir") else None,
-        brain_wipe_dir=Path(d.get("brain_wipe_dir", "brain-wipe-shaders")),
     )
 
 
@@ -971,7 +958,6 @@ def generator_render_recipe(
     normalize: bool = True,
     sequencing: str = "shuffle",
     seed: Optional[int] = None,
-    brain_wipe_dir: Optional[Path] = None,
 ) -> BrainWipeRecipe:
     """Generator shaders + warp chain → shuffle → concat. No source footage."""
     # n_warps will be randomised per-segment between min_warps and max_warps
@@ -992,7 +978,6 @@ def generator_render_recipe(
             sequencing=sequencing,
         )],
         seed=seed,
-        brain_wipe_dir=brain_wipe_dir or Path("brain-wipe-shaders"),
     )
 
 
@@ -1174,7 +1159,6 @@ def hybrid_composite_recipe(
     height: Optional[int] = None,
     composite: Optional[CompositeSpec] = None,
     seed: Optional[int] = None,
-    brain_wipe_dir: Optional[Path] = None,
 ) -> BrainWipeRecipe:
     """Footage meets generator: crushed footage + generator wash, composited via motion mask.
 
@@ -1218,7 +1202,6 @@ def hybrid_composite_recipe(
         width=w,
         height=h,
         seed=seed,
-        brain_wipe_dir=brain_wipe_dir or Path("brain-wipe-shaders"),
     )
 
 
@@ -1375,7 +1358,6 @@ def generator_stooges_recipe(
     n_shaders: int = 2,
     static_gap: float = 0.3,
     seed: Optional[int] = None,
-    brain_wipe_dir: Optional[Path] = None,
 ) -> BrainWipeRecipe:
     """Multi-channel generator CRT: stooges recipe but all-generator, no source footage.
 
@@ -1405,7 +1387,6 @@ def generator_stooges_recipe(
             for count in segment_counts
         ],
         seed=seed,
-        brain_wipe_dir=brain_wipe_dir or Path("brain-wipe-shaders"),
     )
 
 
@@ -1421,7 +1402,6 @@ def gradient_dissolve_recipe(
     width: Optional[int] = None,
     height: Optional[int] = None,
     seed: Optional[int] = None,
-    brain_wipe_dir: Optional[Path] = None,
 ) -> BrainWipeRecipe:
     """Spatial wipe composite: footage + generator via gradient mask.
 
@@ -1460,7 +1440,6 @@ def gradient_dissolve_recipe(
         width=w,
         height=h,
         seed=seed,
-        brain_wipe_dir=brain_wipe_dir or Path("brain-wipe-shaders"),
     )
 
 
@@ -2158,9 +2137,9 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
 
 def _shader_step(rng: _random_mod.Random, complexity: float = 0.5, n: Optional[int] = None) -> ShaderStep:
     """Pick a random boutique shader stack with resolved params."""
-    name, shader_names, shader_params_spec = rng.choice(_BOUTIQUE_STACKS_RAW)
-    _S = Path("shaders")
-    shader_paths = [_S / f"{s}.fs" for s in shader_names]
+    stacks = _active_stacks or _BOUTIQUE_STACKS_RAW
+    name, shader_names, shader_params_spec, shader_base = rng.choice(stacks)
+    shader_paths = [shader_base / f"{s}.fs" for s in shader_names]
     param_overrides = _resolve_shader_params(rng, shader_params_spec) or None
     return ShaderStep(shader_paths=shader_paths, param_overrides=param_overrides)
 
@@ -2785,21 +2764,15 @@ _TIME_EFFECT_TYPES: dict[str, type] = {
 }
 
 
-def load_boutique_stacks(
-    path: Optional[Path] = None,
-) -> list[tuple[str, list[str], dict]]:
-    """Load boutique stack definitions from YAML.
+def _load_stacks_file(
+    path: Path, shader_base: Path,
+) -> list[tuple[str, list[str], dict, Path]]:
+    """Parse a single stacks YAML.
 
-    Returns list of (name, shader_names, shader_params_spec) tuples.
-    ``shader_params_spec`` maps shader stems to param dicts whose values
-    may use randomisation syntax (scalar, ``[min, max]``,
-    ``{choice: [...]}``)..
-    Default path: ``boutique_stacks.yaml`` in the project root.
+    Returns list of (name, shader_names, params_spec, shader_base) tuples.
     """
     import yaml
 
-    if path is None:
-        path = Path(__file__).resolve().parent.parent / "boutique_stacks.yaml"
     with open(path) as f:
         data = yaml.safe_load(f)
     stacks = []
@@ -2808,7 +2781,44 @@ def load_boutique_stacks(
             name,
             spec["shaders"],
             spec.get("shader_params", {}),
+            shader_base,
         ))
+    return stacks
+
+
+def load_boutique_stacks(
+    path: Optional[Path] = None,
+) -> list[tuple[str, list[str], dict, Path]]:
+    """Load boutique stack definitions from shader packs.
+
+    Scans ``packs/*/stacks.yaml`` and returns a flat list of
+    ``(name, shader_names, shader_params_spec, shader_base)`` tuples.
+    The ``shader_base`` path tells callers where to find the ``.fs`` files
+    referenced by stem name in each stack.
+
+    When *path* is given explicitly, loads only that file (for testing).
+    """
+    root = Path(__file__).resolve().parent.parent
+
+    if path is not None:
+        return _load_stacks_file(path, path.parent / "shaders")
+
+    stacks: list[tuple[str, list[str], dict, Path]] = []
+    packs_dir = root / "packs"
+    if packs_dir.is_dir():
+        for pack_dir in sorted(packs_dir.iterdir()):
+            if not pack_dir.is_dir():
+                continue
+            stacks_file = pack_dir / "stacks.yaml"
+            if stacks_file.is_file():
+                shader_base = pack_dir / "shaders"
+                stacks.extend(_load_stacks_file(stacks_file, shader_base))
+
+    if not stacks:
+        raise FileNotFoundError(
+            "No shader stacks found. Place stacks in packs/<pack_name>/stacks.yaml."
+        )
+
     return stacks
 
 
@@ -2847,6 +2857,11 @@ def _make_time_step(rng: _random_mod.Random, spec: dict) -> Step:
 
 # Load stacks from YAML at import time.
 _BOUTIQUE_STACKS_RAW = load_boutique_stacks()
+
+# When set, _shader_step() and _build_boutique() use this instead of
+# _BOUTIQUE_STACKS_RAW.  random_recipe() sets it to a pack-filtered subset
+# for the duration of a single recipe build, then resets to None.
+_active_stacks: Optional[list] = None
 
 
 def _resolve_shader_params(
@@ -2904,9 +2919,9 @@ def _build_boutique(
     seg_target = _seg_dur_target(target_dur, actual_segments, wants_transition)
 
     # Pick a curated stack (with optional shader params)
-    name, shader_names, shader_params_spec = rng.choice(_BOUTIQUE_STACKS_RAW)
-    _S = Path("shaders")
-    shader_paths = [_S / f"{s}.fs" for s in shader_names]
+    stacks = _active_stacks or _BOUTIQUE_STACKS_RAW
+    name, shader_names, shader_params_spec, shader_base = rng.choice(stacks)
+    shader_paths = [shader_base / f"{s}.fs" for s in shader_names]
 
     # Resolve randomised shader params from YAML spec
     param_overrides = _resolve_shader_params(rng, shader_params_spec) or None
@@ -2967,6 +2982,7 @@ def random_recipe(
     archetype: Optional[str] = None,
     width: Optional[int] = None,
     height: Optional[int] = None,
+    packs: Optional[list[str]] = None,
 ) -> BrainWipeRecipe:
     """Procedurally generate a recipe from all available components.
 
@@ -2982,42 +2998,62 @@ def random_recipe(
     Granular overrides (n_lanes, n_steps, etc.) pin specific choices;
     everything else is still derived from complexity.
     src: source footage path. None = pure generator/synthetic mode.
+    packs: restrict shader stacks to these pack names (e.g. ["starter"]).
+           None = use all available packs.
     """
+    global _active_stacks
     complexity = max(0.0, min(1.0, complexity))
     rng = _random_mod.Random(seed)
 
-    if archetype is not None:
-        if archetype not in _ARCHETYPES:
+    # Filter boutique stacks by pack name when requested
+    if packs:
+        pack_set = set(packs)
+        filtered = [s for s in _BOUTIQUE_STACKS_RAW
+                     if s[3].parent.name in pack_set]
+        if not filtered:
             raise ValueError(
-                f"Unknown archetype: {archetype!r}. "
-                f"Valid: {', '.join(_ARCHETYPES)}"
+                f"No boutique stacks found for packs: {packs}. "
+                f"Available: {sorted(set(s[3].parent.name for s in _BOUTIQUE_STACKS_RAW))}"
             )
-        builder, eligible = _ARCHETYPES[archetype]
-        if not eligible(src, n_lanes, use_generators):
-            raise ValueError(
-                f"Archetype {archetype!r} not eligible with "
-                f"src={'set' if src else 'None'}, n_lanes={n_lanes}, "
-                f"use_generators={use_generators}"
-            )
+        _active_stacks = filtered
     else:
-        eligible_names = [
-            name for name, (_, elig) in _ARCHETYPES.items()
-            if elig(src, n_lanes, use_generators)
-        ]
-        archetype = rng.choice(eligible_names)
-        builder = _ARCHETYPES[archetype][0]
+        _active_stacks = None
 
-    recipe = builder(
-        rng, complexity, src,
-        n_lanes=n_lanes, n_steps=n_steps, n_segments=n_segments,
-        use_transitions=use_transitions, use_generators=use_generators,
-        target_dur=target_dur, seed=seed,
-    )
+    try:
+        if archetype is not None:
+            if archetype not in _ARCHETYPES:
+                raise ValueError(
+                    f"Unknown archetype: {archetype!r}. "
+                    f"Valid: {', '.join(_ARCHETYPES)}"
+                )
+            builder, eligible = _ARCHETYPES[archetype]
+            if not eligible(src, n_lanes, use_generators):
+                raise ValueError(
+                    f"Archetype {archetype!r} not eligible with "
+                    f"src={'set' if src else 'None'}, n_lanes={n_lanes}, "
+                    f"use_generators={use_generators}"
+                )
+        else:
+            eligible_names = [
+                name for name, (_, elig) in _ARCHETYPES.items()
+                if elig(src, n_lanes, use_generators)
+            ]
+            archetype = rng.choice(eligible_names)
+            builder = _ARCHETYPES[archetype][0]
 
-    # Explicit width/height override the builder's defaults
-    if width is not None:
-        recipe.width = width
-    if height is not None:
-        recipe.height = height
+        recipe = builder(
+            rng, complexity, src,
+            n_lanes=n_lanes, n_steps=n_steps, n_segments=n_segments,
+            use_transitions=use_transitions, use_generators=use_generators,
+            target_dur=target_dur, seed=seed,
+        )
 
-    return recipe
+        # Explicit width/height override the builder's defaults
+        if width is not None:
+            recipe.width = width
+        if height is not None:
+            recipe.height = height
+
+        return recipe
+    finally:
+        _active_stacks = None

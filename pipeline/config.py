@@ -20,12 +20,14 @@ class Config:
 
     # Source footage lives here
     source_dir: Path = field(default=None)
-    # ISF shader folder — the pipeline scans this for .fs files
-    shader_dir: Path = field(default=None)
     # Working directory for intermediate files (segments, masks, etc.)
     work_dir: Path = field(default=None)
     # Final output directory
     output_dir: Path = field(default=None)
+
+    # ── Shader packs ──────────────────────────────────────────────────────
+    # Filter to specific packs. None = all packs, ["ulp"] = just ulp pack.
+    packs: Optional[list] = None
 
     # ── Video defaults ───────────────────────────────────────────────────
     default_codec: str = "libx264"
@@ -68,8 +70,6 @@ class Config:
     def __post_init__(self):
         if self.source_dir is None:
             self.source_dir = self.project_root / "source"
-        if self.shader_dir is None:
-            self.shader_dir = self.project_root / "shaders"
         if self.work_dir is None:
             self.work_dir = self.project_root / "work"
         if self.output_dir is None:
@@ -93,8 +93,27 @@ class Config:
             args += ["-maxrate", f"{br}k", "-bufsize", f"{br * 2}k"]
         return args
 
+    def pack_shader_dirs(self) -> list:
+        """Shader directories from active packs.
+
+        When self.packs is None, returns all packs/*/shaders/ dirs.
+        When self.packs is a list, returns only matching pack dirs.
+        """
+        dirs = []
+        packs_dir = self.project_root / "packs"
+        if not packs_dir.is_dir():
+            return dirs
+        for pack_dir in sorted(packs_dir.iterdir()):
+            if not pack_dir.is_dir():
+                continue
+            if self.packs is not None and pack_dir.name not in self.packs:
+                continue
+            s_dir = pack_dir / "shaders"
+            if s_dir.is_dir():
+                dirs.append(s_dir)
+        return dirs
+
     def ensure_dirs(self):
         """Create all directories if they don't exist."""
-        for d in (self.source_dir, self.shader_dir,
-                  self.work_dir, self.output_dir):
+        for d in (self.source_dir, self.work_dir, self.output_dir):
             d.mkdir(parents=True, exist_ok=True)

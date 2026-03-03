@@ -169,6 +169,7 @@ def _plan_shows(
             archetype=archetype,
             width=width,
             height=height,
+            packs=c.packs,
         )
 
         _fixup_recipe_sources(recipe, dur, rng)
@@ -321,6 +322,7 @@ def show_reel_render(
                 archetype=archetype_hint,
                 width=width,
                 height=height,
+                packs=c.packs,
             )
             _fixup_recipe_sources(new_recipe, show["duration"], reroll_rng)
 
@@ -551,6 +553,8 @@ def _add_plan_args(parser):
     parser.add_argument("--footage-ratio", type=float, default=0.4,
                         help="Fraction of shows that use footage (0.0–1.0)")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--pack", action="append", dest="packs",
+                        help="Restrict to specific shader packs (repeatable)")
     parser.add_argument("--archetype", type=str, default=None,
                         help="Force a specific archetype for all shows (e.g. deep_time)")
     parser.add_argument("-o", "--output", type=str, default=None)
@@ -592,6 +596,8 @@ def main():
                           help="Stasis detection threshold (0.0 disables)")
     p_render.add_argument("--max-reroll", type=int, default=2,
                           help="Max reroll attempts per stasis show")
+    p_render.add_argument("--pack", action="append", dest="packs",
+                          help="Restrict to specific shader packs (repeatable)")
 
     # run — one-shot plan + render (original behaviour)
     p_run = sub.add_parser("run", help="Plan and render in one shot (default)")
@@ -604,8 +610,10 @@ def main():
 
     args = parser.parse_args()
 
+    packs = getattr(args, "packs", None)
+
     if args.command == "plan":
-        cfg = Config()
+        cfg = Config(packs=packs)
         cfg.ensure_dirs()
         n_shows = _resolve_n_shows(args.n_shows, args.reel_dur,
                                    args.min_dur, args.max_dur)
@@ -638,6 +646,7 @@ def main():
         show_reel_render(
             manifest, output=out, cleanup=not args.no_cleanup,
             motion_floor=args.motion_floor, max_reroll=args.max_reroll,
+            cfg=Config(packs=packs),
         )
 
     elif args.command == "run":
@@ -661,6 +670,7 @@ def main():
             cleanup=not args.no_cleanup,
             motion_floor=args.motion_floor,
             max_reroll=args.max_reroll,
+            cfg=Config(packs=packs),
         )
 
     elif args.command == "batch":
@@ -683,6 +693,7 @@ def main():
             cleanup=not args.no_cleanup,
             motion_floor=args.motion_floor,
             max_reroll=args.max_reroll,
+            cfg=Config(packs=packs),
         )
 
 

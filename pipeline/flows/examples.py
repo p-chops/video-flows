@@ -70,7 +70,6 @@ def cut_shuffle_shader(
 @flow(name="random-shader-collage")
 def random_shader_collage(
     src: Path,
-    shader_dir: Path,
     count: int = 8,
     min_dur: float = 5.0,
     max_dur: float = 15.0,
@@ -99,7 +98,7 @@ def random_shader_collage(
     processed = []
     for i, seg in enumerate(segments):
         dst = c.work_dir / f"shaded_{i:04d}.mp4"
-        apply_random_shader_stack(seg, dst, shader_dir,
+        apply_random_shader_stack(seg, dst,
                                    min_shaders=1, max_shaders=3,
                                    seed=i, cfg=c)
         processed.append(dst)
@@ -250,7 +249,6 @@ def texture_builder(
 @flow(name="shuffled-scene-shaders")
 def shuffled_scene_shaders(
     src: Path,
-    shader_dir: Optional[Path] = None,
     output: Optional[Path] = None,
     scene_threshold: float = 30.0,
     min_shaders: int = 1,
@@ -273,7 +271,6 @@ def shuffled_scene_shaders(
     c = cfg or Config()
     c.ensure_dirs()
     out = output or c.output_dir / "shuffled_scene_shaders.mp4"
-    s_dir = shader_dir or c.shader_dir
 
     if c.default_video_bitrate is None:
         _info = _probe(src, c)
@@ -290,7 +287,7 @@ def shuffled_scene_shaders(
         dst = c.work_dir / f"scene_shaded_{i:04d}.mp4"
         seg_seed = (seed + i) if seed is not None else None
         future = apply_random_shader_stack.submit(
-            seg, dst, s_dir,
+            seg, dst,
             min_shaders=min_shaders, max_shaders=max_shaders,
             seed=seg_seed, cfg=c,
         )
@@ -310,7 +307,6 @@ def shuffled_scene_shaders(
 @flow(name="deep-color", log_prints=True)
 def deep_color(
     src: Path,
-    shader_dir: Optional[Path] = None,
     output: Optional[Path] = None,
     scene_threshold: float = 30.0,
     shaders_per_pass: int = 3,
@@ -348,7 +344,6 @@ def deep_color(
     c = cfg or Config()
     c.ensure_dirs()
     out = output or c.output_dir / "deep_color.mp4"
-    s_dir = shader_dir or c.shader_dir
 
     # Match source bitrate for all re-encoding in this flow
     if c.default_video_bitrate is None:
@@ -356,12 +351,14 @@ def deep_color(
         if info.bitrate > 0:
             c.default_video_bitrate = info.bitrate
 
-    # Load shader library
-    all_shaders = load_shader_dir(s_dir)
+    # Load shader library from all active packs
+    all_shaders = {}
+    for s_dir in c.pack_shader_dirs():
+        all_shaders.update(load_shader_dir(s_dir))
     if not all_shaders:
-        raise ValueError(f"No .fs shaders found in {s_dir}")
+        raise ValueError("No .fs shaders found in any pack (packs/*/shaders/)")
     shader_names = list(all_shaders.keys())
-    print(f"Shader library: {len(all_shaders)} shaders in {s_dir}")
+    print(f"Shader library: {len(all_shaders)} shaders from {len(c.pack_shader_dirs())} pack(s)")
     print(f"Pipeline: crush({crush:.0%}) → {shaders_per_pass} shaders "
           f"→ crush({crush:.0%}) → {shaders_per_pass} shaders → normalize")
 
@@ -589,7 +586,6 @@ def shader_lab(
     src: Path,
     count: int = 4,
     duration: float = 30.0,
-    shader_dir: Optional[Path] = None,
     min_shaders: int = 1,
     max_shaders: int = 3,
     seed: Optional[int] = None,
@@ -611,7 +607,6 @@ def shader_lab(
 
     c = cfg or Config()
     c.ensure_dirs()
-    s_dir = shader_dir or c.shader_dir
     out_dir = output_dir or c.output_dir / "shader_lab"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -624,11 +619,13 @@ def shader_lab(
     if c.default_video_bitrate is None and info.bitrate > 0:
         c.default_video_bitrate = info.bitrate
 
-    # Load all available shaders
-    all_shaders = load_shader_dir(s_dir)
+    # Load all available shaders from active packs
+    all_shaders = {}
+    for s_dir in c.pack_shader_dirs():
+        all_shaders.update(load_shader_dir(s_dir))
     if not all_shaders:
-        raise ValueError(f"No .fs shaders found in {s_dir}")
-    print(f"Shader library: {len(all_shaders)} shaders in {s_dir}")
+        raise ValueError("No .fs shaders found in any pack (packs/*/shaders/)")
+    print(f"Shader library: {len(all_shaders)} shaders from {len(c.pack_shader_dirs())} pack(s)")
 
     # Extract random clips
     segments = random_segments(src, count,
@@ -715,7 +712,6 @@ def crush_lab(
     src: Path,
     count: int = 4,
     duration: float = 30.0,
-    shader_dir: Optional[Path] = None,
     min_shaders: int = 1,
     max_shaders: int = 6,
     crush: float = 0.7,
@@ -742,7 +738,6 @@ def crush_lab(
 
     c = cfg or Config()
     c.ensure_dirs()
-    s_dir = shader_dir or c.shader_dir
     out_dir = output_dir or c.output_dir / "crush_lab"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -754,10 +749,12 @@ def crush_lab(
     if c.default_video_bitrate is None and info.bitrate > 0:
         c.default_video_bitrate = info.bitrate
 
-    all_shaders = load_shader_dir(s_dir)
+    all_shaders = {}
+    for s_dir in c.pack_shader_dirs():
+        all_shaders.update(load_shader_dir(s_dir))
     if not all_shaders:
-        raise ValueError(f"No .fs shaders found in {s_dir}")
-    print(f"Shader library: {len(all_shaders)} shaders in {s_dir}")
+        raise ValueError("No .fs shaders found in any pack (packs/*/shaders/)")
+    print(f"Shader library: {len(all_shaders)} shaders from {len(c.pack_shader_dirs())} pack(s)")
     print(f"Crush: {crush:.0%} intensity, codec={crush_codec}")
 
     # Extract random clips
@@ -889,7 +886,8 @@ def _cli():
     p = sub.add_parser("random-shader-collage",
                        help="Random segments with random shader stacks")
     p.add_argument("src", type=Path)
-    p.add_argument("--shader-dir", type=Path)
+    p.add_argument("--pack", action="append", dest="packs",
+                   help="Restrict to specific shader packs (repeatable)")
     p.add_argument("-n", "--count", type=int, default=8)
     p.add_argument("--min-dur", type=float, default=5.0)
     p.add_argument("--max-dur", type=float, default=15.0)
@@ -923,7 +921,8 @@ def _cli():
     p = sub.add_parser("shuffled-scene-shaders",
                        help="Detect scenes, per-scene random shaders, shuffle")
     p.add_argument("src", type=Path)
-    p.add_argument("--shader-dir", type=Path)
+    p.add_argument("--pack", action="append", dest="packs",
+                   help="Restrict to specific shader packs (repeatable)")
     p.add_argument("-o", "--output", type=Path)
     p.add_argument("--threshold", type=float, default=30.0)
     p.add_argument("--min-shaders", type=int, default=1)
@@ -934,7 +933,8 @@ def _cli():
     p = sub.add_parser("deep-color",
                        help="B&W narrative → crush-shader sandwich → composite")
     p.add_argument("src", type=Path)
-    p.add_argument("--shader-dir", type=Path)
+    p.add_argument("--pack", action="append", dest="packs",
+                   help="Restrict to specific shader packs (repeatable)")
     p.add_argument("-o", "--output", type=Path)
     p.add_argument("--threshold", type=float, default=30.0)
     p.add_argument("--shaders-per-pass", type=int, default=3,
@@ -979,7 +979,8 @@ def _cli():
     p.add_argument("-n", "--count", type=int, default=4)
     p.add_argument("--duration", type=float, default=30.0,
                    help="Clip duration in seconds (default: 30)")
-    p.add_argument("--shader-dir", type=Path)
+    p.add_argument("--pack", action="append", dest="packs",
+                   help="Restrict to specific shader packs (repeatable)")
     p.add_argument("--min-shaders", type=int, default=1)
     p.add_argument("--max-shaders", type=int, default=3)
     p.add_argument("--seed", type=int, default=None)
@@ -991,7 +992,8 @@ def _cli():
     p.add_argument("src", type=Path)
     p.add_argument("-n", "--count", type=int, default=4)
     p.add_argument("--duration", type=float, default=30.0)
-    p.add_argument("--shader-dir", type=Path)
+    p.add_argument("--pack", action="append", dest="packs",
+                   help="Restrict to specific shader packs (repeatable)")
     p.add_argument("--min-shaders", type=int, default=1)
     p.add_argument("--max-shaders", type=int, default=6)
     p.add_argument("--crush", type=float, default=0.7,
@@ -1005,7 +1007,8 @@ def _cli():
     p = sub.add_parser("warp-chain",
                        help="Apply a chain of warp shaders to source footage")
     p.add_argument("src", type=Path)
-    p.add_argument("--shader-dir", type=Path, default=None)
+    p.add_argument("--pack", action="append", dest="packs",
+                   help="Restrict to specific shader packs (repeatable)")
     p.add_argument("--shaders", type=Path, nargs="+", default=None,
                    dest="shader_paths",
                    help="Explicit shader list (skips random selection)")
@@ -1022,7 +1025,8 @@ def _cli():
     p = sub.add_parser("brain-wipe-render",
                        help="Pre-render a long-form brain wipe sequence")
     p.add_argument("src", type=Path)
-    p.add_argument("--shader-dir", type=Path, default=None)
+    p.add_argument("--pack", action="append", dest="packs",
+                   help="Restrict to specific shader packs (repeatable)")
     p.add_argument("--categories", nargs="+", default=["Warp", "Brain Wipe"])
     p.add_argument("-n", "--n-segments", type=int, default=8)
     p.add_argument("--segment-dur", type=float, default=20.0)
@@ -1041,7 +1045,8 @@ def _cli():
                        help="Build multi-channel CRT TV content with static bursts")
     p.add_argument("src", type=Path,
                    help="Source footage (e.g. tooth_will_out.mp4)")
-    p.add_argument("--shader-dir", type=Path, default=None)
+    p.add_argument("--pack", action="append", dest="packs",
+                   help="Restrict to specific shader packs (repeatable)")
     p.add_argument("-n", "--n-channels", type=int, default=4,
                    help="Number of channel files to produce (default: 4)")
     p.add_argument("--static-duration", type=float, default=0.3,
@@ -1060,7 +1065,7 @@ def _cli():
     p.add_argument("-o", "--output-dir", type=Path, default=None)
 
     args = parser.parse_args()
-    cfg = Config()
+    cfg = Config(packs=getattr(args, "packs", None))
     cfg.ensure_dirs()
 
     if args.flow == "cut-shuffle-shader":
@@ -1070,7 +1075,7 @@ def _cli():
         )
     elif args.flow == "random-shader-collage":
         out = random_shader_collage(
-            args.src, args.shader_dir or cfg.shader_dir,
+            args.src,
             count=args.count, min_dur=args.min_dur, max_dur=args.max_dur,
             output=args.output, cfg=cfg,
         )
@@ -1090,7 +1095,7 @@ def _cli():
         )
     elif args.flow == "shuffled-scene-shaders":
         out = shuffled_scene_shaders(
-            args.src, shader_dir=args.shader_dir,
+            args.src,
             output=args.output, scene_threshold=args.threshold,
             min_shaders=args.min_shaders, max_shaders=args.max_shaders,
             seed=args.seed, cfg=cfg,
@@ -1112,7 +1117,6 @@ def _cli():
     elif args.flow == "shader-lab":
         samples = shader_lab(
             args.src, count=args.count, duration=args.duration,
-            shader_dir=args.shader_dir,
             min_shaders=args.min_shaders, max_shaders=args.max_shaders,
             seed=args.seed, output_dir=args.output_dir, cfg=cfg,
         )
@@ -1121,7 +1125,6 @@ def _cli():
     elif args.flow == "crush-lab":
         samples = crush_lab(
             args.src, count=args.count, duration=args.duration,
-            shader_dir=args.shader_dir,
             min_shaders=args.min_shaders, max_shaders=args.max_shaders,
             crush=args.crush, crush_codec=args.crush_codec,
             seed=args.seed, output_dir=args.output_dir, cfg=cfg,
@@ -1130,7 +1133,7 @@ def _cli():
         return
     elif args.flow == "deep-color":
         out = deep_color(
-            args.src, shader_dir=args.shader_dir,
+            args.src,
             output=args.output, scene_threshold=args.threshold,
             shaders_per_pass=args.shaders_per_pass,
             crush=args.crush,
@@ -1143,7 +1146,6 @@ def _cli():
     elif args.flow == "warp-chain":
         out = warp_chain(
             src=args.src,
-            shader_dir=args.shader_dir,
             shader_paths=args.shader_paths,
             shader_categories=args.categories,
             n_shaders=args.n_shaders,
@@ -1156,7 +1158,6 @@ def _cli():
     elif args.flow == "brain-wipe-render":
         out = brain_wipe_render(
             src=args.src,
-            shader_dir=args.shader_dir,
             shader_categories=args.categories,
             n_segments=args.n_segments,
             segment_dur=args.segment_dur,
@@ -1172,7 +1173,6 @@ def _cli():
     elif args.flow == "stooges-channels":
         channels = stooges_channels(
             src=args.src,
-            shader_dir=args.shader_dir,
             n_channels=args.n_channels,
             static_duration=args.static_duration,
             shuffle=args.shuffle,

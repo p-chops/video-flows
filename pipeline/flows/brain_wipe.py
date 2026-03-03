@@ -191,6 +191,20 @@ def filter_shaders(
     return result
 
 
+def _load_all_pack_shaders(
+    cfg: Config,
+    shader_cache: dict[str, dict[str, ISFShader]],
+) -> dict[str, ISFShader]:
+    """Load and merge shaders from all active pack shader directories."""
+    merged: dict[str, ISFShader] = {}
+    for s_dir in cfg.pack_shader_dirs():
+        key = str(s_dir)
+        if key not in shader_cache:
+            shader_cache[key] = load_shader_dir(s_dir)
+        merged.update(shader_cache[key])
+    return merged
+
+
 def randomise_params(
     shader: ISFShader,
     rng: random.Random,
@@ -257,7 +271,6 @@ def print_stack(shaders: list[Path],
       task_runner=ConcurrentTaskRunner(max_workers=3))
 def warp_chain(
     src: Path,
-    shader_dir: Optional[Path] = None,
     shader_paths: Optional[list[Path]] = None,
     shader_categories: Optional[list[str]] = None,
     n_shaders: int = 2,
@@ -274,10 +287,11 @@ def warp_chain(
     "Brain Wipe", and further restricts to video warpers (shaders with an
     inputImage input) so generators (plasma, tunnel, chladni) are excluded.
 
+    Shaders are loaded from all active shader packs (packs/*/shaders/).
+
     Parameters
     ----------
     src               : source footage
-    shader_dir        : ISF shader directory (defaults to cfg.shader_dir)
     shader_paths      : explicit list of shader paths — skips library loading
                         and random selection entirely
     shader_categories : category filter (default: ["Warp", "Brain Wipe"])
@@ -292,7 +306,6 @@ def warp_chain(
     c = cfg or Config()
     c.ensure_dirs()
     out = output or c.output_dir / "warp_chain.mp4"
-    s_dir = shader_dir or c.shader_dir
 
     info = probe(src, c)
     print(
@@ -313,10 +326,11 @@ def warp_chain(
         print_stack(paths, overrides)
 
     else:
-        # Load library and filter
+        # Load library from all packs and filter
         cats = shader_categories if shader_categories is not None \
                else ["Warp", "Brain Wipe"]
-        all_shaders = load_shader_dir(s_dir)
+        shader_cache: dict[str, dict[str, ISFShader]] = {}
+        all_shaders = _load_all_pack_shaders(c, shader_cache)
         pool = filter_shaders(
             all_shaders,
             categories=cats if cats else None,
@@ -326,7 +340,7 @@ def warp_chain(
         if not pool:
             # Fall back to full library if filter yields nothing
             print(
-                f"Warning: no shaders matched categories={cats} in {s_dir}. "
+                f"Warning: no shaders matched categories={cats}. "
                 f"Using full library ({len(all_shaders)} shaders)."
             )
             pool = all_shaders
@@ -364,7 +378,6 @@ def warp_chain(
 @flow(name="brain-wipe-render", log_prints=True,
       task_runner=ConcurrentTaskRunner(max_workers=3))
 def brain_wipe_render(
-    shader_dir: Optional[Path] = None,
     shader_categories: Optional[list[str]] = None,
     n_segments: int = 8,
     segment_dur: float = 20.0,
@@ -389,15 +402,10 @@ def brain_wipe_render(
     solid black placeholder clips drive the frame loop while generators
     synthesize all visual content.
 
-    Optionally, warp shaders can be chained after the generator to further
-    distort the synthesized imagery.
-
-    Segments are normalized, optionally shuffled, and concatenated into a
-    single output suitable for use as a stream asset or OBS media source.
+    Shaders are loaded from all active shader packs (packs/*/shaders/).
 
     Parameters
     ----------
-    shader_dir        : ISF shader directory (defaults to cfg.shader_dir)
     shader_categories : categories to filter from (default: ["Warp", "Brain Wipe"])
     n_segments        : number of segments to process (default: 8)
     segment_dur       : duration of each segment in seconds (default: 20.0)
@@ -416,17 +424,17 @@ def brain_wipe_render(
     c = cfg or Config()
     c.ensure_dirs()
     out = output or c.output_dir / "brain_wipe_render.mp4"
-    s_dir = shader_dir or c.shader_dir
     cats = shader_categories if shader_categories is not None \
            else ["Warp", "Brain Wipe", "Generator"]
 
     print(f"Output format: {width}x{height} @ {fps:.2f}fps")
 
-    # ── Load and partition shader library ────────────────────────────────
+    # ── Load and partition shader library from packs ─────────────────────
 
-    all_shaders = load_shader_dir(s_dir)
+    shader_cache: dict[str, dict[str, ISFShader]] = {}
+    all_shaders = _load_all_pack_shaders(c, shader_cache)
     if not all_shaders:
-        raise ValueError(f"No .fs shaders found in {s_dir}")
+        raise ValueError("No .fs shaders found in any pack (packs/*/shaders/).")
 
     # Warpers: video warp shaders (have inputImage)
     warpers = filter_shaders(
@@ -448,7 +456,7 @@ def brain_wipe_render(
 
     if not generators:
         raise ValueError(
-            f"No generator shaders (no inputImage) found in {s_dir} "
+            f"No generator shaders (no inputImage) found in packs "
             f"matching categories={cats}. "
             f"Generator shaders are required for brain_wipe_render."
         )
@@ -586,12 +594,7 @@ def _resolve_shaders_for_step(
     if step.shader_paths:
         return step.shader_paths, step.param_overrides or {}
 
-    s_dir = step.shader_dir or recipe.shader_dir or cfg.shader_dir
-    key = str(s_dir)
-    if key not in shader_cache:
-        shader_cache[key] = load_shader_dir(s_dir)
-
-    pool = shader_cache[key]
+    pool = _load_all_pack_shaders(cfg, shader_cache)
     if step.categories:
         pool = filter_shaders(pool, categories=step.categories)
 
@@ -872,23 +875,18 @@ def _materialize_generator_source(
     work = cfg.work_dir / f"bw_{recipe_tag}_lane_{lane_idx:02d}"
     work.mkdir(parents=True, exist_ok=True)
 
-    bw_dir = recipe.brain_wipe_dir
-    key = str(bw_dir)
-    if key not in shader_cache:
-        shader_cache[key] = load_shader_dir(bw_dir)
-
-    bw_shaders = shader_cache[key]
-    generators = filter_shaders(bw_shaders, has_image_input=False)
+    all_shaders = _load_all_pack_shaders(cfg, shader_cache)
+    generators = filter_shaders(all_shaders, has_image_input=False)
     warpers = filter_shaders(
-        bw_shaders,
+        all_shaders,
         categories=source.warp_categories,
         has_image_input=True,
     )
 
     if not generators:
         raise ValueError(
-            f"No generator shaders found in {bw_dir}. "
-            f"Generator shaders (no inputImage) are required."
+            "No generator shaders found in any pack (packs/*/shaders/). "
+            "Generator shaders (no inputImage) are required."
         )
 
     futures = []
@@ -1360,16 +1358,8 @@ def brain_wipe(
 
     # ── Pre-populate shader cache (thread-safety) ─────────────────────────
 
-    for lane in recipe.lanes:
-        for step in lane.recipe:
-            if isinstance(step, ShaderStep) and not step.shader_paths:
-                s_dir = str(step.shader_dir or recipe.shader_dir or c.shader_dir)
-                if s_dir not in shader_cache:
-                    shader_cache[s_dir] = load_shader_dir(Path(s_dir))
-        if isinstance(lane.source, GeneratorSource):
-            bw_key = str(recipe.brain_wipe_dir)
-            if bw_key not in shader_cache:
-                shader_cache[bw_key] = load_shader_dir(recipe.brain_wipe_dir)
+    # Pre-load all pack shaders into cache
+    _load_all_pack_shaders(c, shader_cache)
 
     # ── Pre-derive lane seeds (deterministic regardless of thread order) ──
 
@@ -1500,7 +1490,8 @@ def _cli():
     p = sub.add_parser("warp-chain",
                        help="Apply a chain of warp shaders to source footage")
     p.add_argument("src", type=Path)
-    p.add_argument("--shader-dir", type=Path, default=None)
+    p.add_argument("--pack", action="append", dest="packs",
+                   help="Restrict to specific shader packs (repeatable)")
     p.add_argument("--shaders", type=Path, nargs="+", default=None,
                    dest="shader_paths",
                    help="Explicit shader list (skips random selection)")
@@ -1520,7 +1511,8 @@ def _cli():
     # ── brain-wipe-render ──
     p = sub.add_parser("brain-wipe-render",
                        help="Pre-render a long-form brain wipe sequence")
-    p.add_argument("--shader-dir", type=Path, default=None)
+    p.add_argument("--pack", action="append", dest="packs",
+                   help="Restrict to specific shader packs (repeatable)")
     p.add_argument("--categories", nargs="+",
                    default=["Warp", "Brain Wipe", "Generator"])
     p.add_argument("-n", "--n-segments", type=int, default=8,
@@ -1573,21 +1565,20 @@ def _cli():
                    help="Static gap duration for stooges (default: 0.3)")
     p.add_argument("--n-warps", type=int, default=2,
                    help="Warp shaders for generator preset (default: 2)")
-    p.add_argument("--brain-wipe-dir", type=Path,
-                   default=Path("brain-wipe-shaders"))
+    p.add_argument("--pack", action="append", dest="packs",
+                   help="Restrict to specific shader packs (repeatable)")
     p.add_argument("--no-normalize", dest="normalize", action="store_false",
                    default=True)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("-o", "--output", type=Path, default=None)
 
     args = parser.parse_args()
-    cfg = Config()
+    cfg = Config(packs=getattr(args, "packs", None))
     cfg.ensure_dirs()
 
     if args.flow == "warp-chain":
         out = warp_chain(
             src=args.src,
-            shader_dir=args.shader_dir,
             shader_paths=args.shader_paths,
             shader_categories=args.categories,
             n_shaders=args.n_shaders,
@@ -1601,7 +1592,6 @@ def _cli():
 
     elif args.flow == "brain-wipe-render":
         out = brain_wipe_render(
-            shader_dir=args.shader_dir,
             shader_categories=args.categories,
             n_segments=args.n_segments,
             segment_dur=args.segment_dur,
@@ -1679,7 +1669,6 @@ def _cli():
                 max_warps=args.n_warps,
                 normalize=args.normalize,
                 seed=args.seed,
-                brain_wipe_dir=args.brain_wipe_dir,
             )
         elif preset == "temporal-sandwich":
             r = temporal_sandwich_recipe(
@@ -1703,7 +1692,6 @@ def _cli():
                 segment_dur=args.segment_dur,
                 n_warps=args.n_warps,
                 seed=args.seed,
-                brain_wipe_dir=args.brain_wipe_dir,
             )
         elif preset == "codec-spectrum":
             r = codec_spectrum_recipe(
@@ -1744,7 +1732,6 @@ def _cli():
                 n_shaders=args.n_shaders,
                 static_gap=args.static_gap,
                 seed=args.seed,
-                brain_wipe_dir=args.brain_wipe_dir,
             )
         elif preset == "gradient-dissolve":
             r = gradient_dissolve_recipe(
@@ -1755,7 +1742,6 @@ def _cli():
                 segment_dur=args.segment_dur,
                 n_warps=args.n_warps,
                 seed=args.seed,
-                brain_wipe_dir=args.brain_wipe_dir,
             )
         elif preset == "accretion":
             r = accretion_recipe(

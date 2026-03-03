@@ -17,7 +17,6 @@ Usage (Python):
 CLI:
     python -m pipeline.flows.compositing_lab \\
         -n 8 --seed 42 --segment-dur 10 \\
-        --brain-wipe-dir brain-wipe-shaders \\
         -o output/comp_lab
 """
 
@@ -157,27 +156,23 @@ def _make_layer_solid(
 def _preprocess_layer(
     layer: Path, work_dir: Path, tag: str,
     rng: random.Random,
-    shader_dir: Optional[Path],
-    brain_wipe_dir: Optional[Path],
+    all_shaders: dict,
     cfg: Config,
 ) -> Path:
     """Optionally warp a layer through 1-2 spatial shaders before compositing."""
     if rng.random() > 0.5:
         return layer
 
-    # Build a pool of warp shader paths from available sources
+    # Build a pool of warp shader paths from all loaded shaders
     warp_paths: list[Path] = []
 
-    if shader_dir and shader_dir.exists():
-        all_shaders = load_shader_dir(shader_dir)
-        for stem in WARP_SHADER_STEMS:
-            if stem in all_shaders:
-                warp_paths.append(all_shaders[stem].path)
+    for stem in WARP_SHADER_STEMS:
+        if stem in all_shaders:
+            warp_paths.append(all_shaders[stem].path)
 
-    if brain_wipe_dir and brain_wipe_dir.exists():
-        bw_shaders = load_shader_dir(brain_wipe_dir)
-        warp_pool = filter_shaders(bw_shaders, has_image_input=True)
-        warp_paths.extend(s.path for s in warp_pool.values())
+    warp_pool = filter_shaders(all_shaders, has_image_input=True)
+    warp_paths.extend(s.path for s in warp_pool.values()
+                      if s.path not in warp_paths)
 
     if not warp_paths:
         return layer
@@ -374,8 +369,7 @@ def _build_sample(
     segment_dur: float,
     width: int, height: int, fps: float,
     work_dir: Path, out_dir: Path,
-    shader_dir: Optional[Path],
-    brain_wipe_dir: Optional[Path],
+    all_shaders: dict,
     generators: dict,
     warpers: dict,
     min_warps: int,
@@ -415,7 +409,7 @@ def _build_sample(
         tag = f"s{sample_idx:03d}_pre{j}"
         preprocessed.append(
             _preprocess_layer(layer, sample_work, tag, rng,
-                              shader_dir, brain_wipe_dir, cfg)
+                              all_shaders, cfg)
         )
     layers = preprocessed
 
@@ -458,9 +452,9 @@ def _build_sample(
     result = layers[0]
 
     # ── Step 3: Optional post-processing ─────────────────────────────────
-    if shader_dir and rng.random() < 0.5:
+    if all_shaders and rng.random() < 0.5:
         post_shaded = sample_work / f"s{sample_idx:03d}_post_shader.mp4"
-        apply_random_shader_stack(result, post_shaded, shader_dir,
+        apply_random_shader_stack(result, post_shaded,
                                    min_shaders=1, max_shaders=1,
                                    seed=rng.randint(0, 2**31), cfg=cfg)
         result = post_shaded
@@ -489,8 +483,6 @@ def compositing_lab(
     width: int = 1280,
     height: int = 720,
     fps: float = 30.0,
-    shader_dir: Optional[Path] = None,
-    brain_wipe_dir: Path = Path("brain-wipe-shaders"),
     min_warps: int = 0,
     max_warps: int = 2,
     output_dir: Optional[Path] = None,
@@ -514,25 +506,22 @@ def compositing_lab(
 
     base_seed = seed if seed is not None else random.randint(0, 2**31)
 
-    # Load brain wipe shader library
-    all_bw_shaders = load_shader_dir(brain_wipe_dir)
-    generators = filter_shaders(all_bw_shaders, has_image_input=False)
-    warpers = filter_shaders(all_bw_shaders, has_image_input=True)
+    # Load all shaders from active packs
+    all_shaders = {}
+    for s_dir in c.pack_shader_dirs():
+        all_shaders.update(load_shader_dir(s_dir))
+    generators = filter_shaders(all_shaders, has_image_input=False)
+    warpers = filter_shaders(all_shaders, has_image_input=True)
 
     if not generators:
         raise ValueError(
-            f"No generator shaders found in {brain_wipe_dir}. "
-            f"Generator shaders are required for compositing lab."
+            "No generator shaders found in any pack. "
+            "Generator shaders are required for compositing lab."
         )
 
-    print(f"Brain wipe library: {len(generators)} generators, "
-          f"{len(warpers)} warpers from {brain_wipe_dir}")
-
-    # Validate shader_dir (used for preprocessing warps + post-processing)
-    s_dir = shader_dir
-    if s_dir and not s_dir.exists():
-        print(f"Warning: shader_dir {s_dir} not found, disabling shader extras")
-        s_dir = None
+    print(f"Shader library: {len(all_shaders)} shaders "
+          f"({len(generators)} generators, {len(warpers)} warpers) "
+          f"from {len(c.pack_shader_dirs())} pack(s)")
 
     print(f"Compositing lab: {n_samples} samples, {segment_dur}s each, "
           f"{width}x{height}@{fps}fps, seed={base_seed}")
@@ -544,9 +533,6 @@ def compositing_lab(
     # inner task runs scoped to it for full observability.
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Resolve brain_wipe_dir for pre-processing warp shaders
-    bw_dir = brain_wipe_dir if brain_wipe_dir.exists() else None
-
     def _run_sample(i):
         return i, _build_sample(
             sample_idx=i,
@@ -554,8 +540,7 @@ def compositing_lab(
             segment_dur=segment_dur,
             width=width, height=height, fps=fps,
             work_dir=work, out_dir=out_dir,
-            shader_dir=s_dir,
-            brain_wipe_dir=bw_dir,
+            all_shaders=all_shaders,
             generators=generators,
             warpers=warpers,
             min_warps=min_warps,
@@ -596,11 +581,8 @@ def _cli():
                         help="Output height (default: 720)")
     parser.add_argument("--fps", type=float, default=30.0,
                         help="Output frame rate (default: 30)")
-    parser.add_argument("--shader-dir", type=Path, default=None,
-                        help="Glitch shader directory for pre/post-processing")
-    parser.add_argument("--brain-wipe-dir", type=Path,
-                        default=Path("brain-wipe-shaders"),
-                        help="Brain wipe shader directory (default: brain-wipe-shaders)")
+    parser.add_argument("--pack", action="append", dest="packs",
+                        help="Restrict to specific shader packs (repeatable)")
     parser.add_argument("--min-warps", type=int, default=0,
                         help="Min warp shaders per brain wipe layer (default: 0)")
     parser.add_argument("--max-warps", type=int, default=2,
@@ -609,7 +591,7 @@ def _cli():
                         help="Output directory (default: output/comp_lab)")
 
     args = parser.parse_args()
-    cfg = Config()
+    cfg = Config(packs=args.packs)
     cfg.ensure_dirs()
 
     compositing_lab(
@@ -619,8 +601,6 @@ def _cli():
         width=args.width,
         height=args.height,
         fps=args.fps,
-        shader_dir=args.shader_dir,
-        brain_wipe_dir=args.brain_wipe_dir,
         min_warps=args.min_warps,
         max_warps=args.max_warps,
         output_dir=args.output_dir,

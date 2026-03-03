@@ -214,22 +214,24 @@ def apply_shader_stack(src: Path, dst: Path,
 @task(name="apply-random-shader-stack", tags=["gpu"], cache_policy=FILE_VALIDATED_INPUTS, persist_result=True)
 def apply_random_shader_stack(
     src: Path, dst: Path,
-    shader_dir: Path,
     min_shaders: int = 1, max_shaders: int = 4,
     seed: Optional[int] = None,
     cfg: Optional[Config] = None,
 ) -> Path:
     """
-    Pick a random subset of shaders from a directory and apply them
-    with randomised parameters. Great for generative exploration.
+    Pick a random subset of shaders from all active shader packs and apply
+    them with randomised parameters. Great for generative exploration.
     """
     import random as rng
     if seed is not None:
         rng.seed(seed)
 
-    all_shaders = load_shader_dir(shader_dir)
+    c = cfg or Config()
+    all_shaders = {}
+    for s_dir in c.pack_shader_dirs():
+        all_shaders.update(load_shader_dir(s_dir))
     if not all_shaders:
-        raise ValueError(f"No .fs shaders found in {shader_dir}")
+        raise ValueError("No .fs shaders found in any pack (packs/*/shaders/)")
 
     count = rng.randint(min_shaders, min(max_shaders, len(all_shaders)))
     chosen_names = rng.sample(list(all_shaders.keys()), count)

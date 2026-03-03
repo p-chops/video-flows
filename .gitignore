@@ -38,14 +38,9 @@ source/
 *.mp3
 *.flac
 
-# Shaders (external assets, not tracked)
-*.fs
-*.vs
-shaders/
-brain-wipe-shaders/
-
-# External assets and config
-boutique_stacks.yaml
+# Shader packs — track starter (ships with repo), ignore personal packs
+packs/*
+!packs/starter/
 
 # Docs (local only)
 docs/
