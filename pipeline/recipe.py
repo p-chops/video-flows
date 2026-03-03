@@ -2952,19 +2952,20 @@ def _eligible_boutique(src, n_lanes, use_generators):
     return n_lanes is None or n_lanes == 1
 
 
+# (builder, eligibility_fn, weight) — weight controls selection probability
 _ARCHETYPES: dict[str, tuple] = {
-    # "crush_sandwich":    (_build_crush_sandwich, _eligible_crush_sandwich),
-    "deep_time":         (_build_deep_time, _eligible_deep_time),
-    "temporal_sandwich": (_build_temporal_sandwich, _eligible_temporal_sandwich),
-    "escalation":        (_build_escalation, _eligible_escalation),
-    "polyrhythm":        (_build_polyrhythm, _eligible_polyrhythm),
-    "palimpsest":        (_build_palimpsest, _eligible_palimpsest),
-    "hybrid":            (_build_hybrid, _eligible_hybrid),
-    "grab_bag":          (_build_grab_bag, _eligible_grab_bag),
-    "stutter":           (_build_stutter, _eligible_stutter),
-    "echo_chamber":      (_build_echo_chamber, _eligible_echo_chamber),
-    "warp_focus":        (_build_warp_focus, _eligible_warp_focus),
-    "boutique":          (_build_boutique, _eligible_boutique),
+    # "crush_sandwich":    (_build_crush_sandwich, _eligible_crush_sandwich, 1.0),
+    "deep_time":         (_build_deep_time, _eligible_deep_time, 2.0),
+    "temporal_sandwich": (_build_temporal_sandwich, _eligible_temporal_sandwich, 2.0),
+    # "escalation":        (_build_escalation, _eligible_escalation, 1.0),  # crush kills motion
+    "polyrhythm":        (_build_polyrhythm, _eligible_polyrhythm, 1.0),
+    "palimpsest":        (_build_palimpsest, _eligible_palimpsest, 1.0),
+    "hybrid":            (_build_hybrid, _eligible_hybrid, 1.0),
+    # "grab_bag":          (_build_grab_bag, _eligible_grab_bag, 1.0),  # no structural identity
+    "stutter":           (_build_stutter, _eligible_stutter, 1.0),
+    # "echo_chamber":      (_build_echo_chamber, _eligible_echo_chamber, 1.0),  # subset of temporal_sandwich
+    # "warp_focus":        (_build_warp_focus, _eligible_warp_focus, 1.0),  # boutique stacks cover warps
+    "boutique":          (_build_boutique, _eligible_boutique, 3.0),
 }
 
 
@@ -3026,7 +3027,7 @@ def random_recipe(
                     f"Unknown archetype: {archetype!r}. "
                     f"Valid: {', '.join(_ARCHETYPES)}"
                 )
-            builder, eligible = _ARCHETYPES[archetype]
+            builder, eligible, _w = _ARCHETYPES[archetype]
             if not eligible(src, n_lanes, use_generators):
                 raise ValueError(
                     f"Archetype {archetype!r} not eligible with "
@@ -3034,11 +3035,13 @@ def random_recipe(
                     f"use_generators={use_generators}"
                 )
         else:
-            eligible_names = [
-                name for name, (_, elig) in _ARCHETYPES.items()
+            eligible = [
+                (name, weight)
+                for name, (_, elig, weight) in _ARCHETYPES.items()
                 if elig(src, n_lanes, use_generators)
             ]
-            archetype = rng.choice(eligible_names)
+            names, weights = zip(*eligible)
+            archetype = rng.choices(names, weights=weights, k=1)[0]
             builder = _ARCHETYPES[archetype][0]
 
         recipe = builder(
