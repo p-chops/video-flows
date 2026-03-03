@@ -6,9 +6,9 @@ A pack is just a directory under `packs/` with two things inside: shaders and a 
 
 ```
 packs/
-├── starter/          ← ships with the repo (tracked in git)
+├── starter/          ← ships with the repo (14 shaders, 12 stacks)
 │   ├── shaders/
-│   │   └── starter_glow.fs
+│   │   └── *.fs
 │   └── stacks.yaml
 └── my_pack/          ← your personal pack (gitignored)
     ├── shaders/

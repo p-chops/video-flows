@@ -19,7 +19,7 @@ Shader packs are self-contained bundles of ISF shaders and curated combinations 
 
 ```
 packs/
-├── starter/          ← included — 8 shaders, 5 stacks
+├── starter/          ← included — 14 shaders, 12 stacks
 │   ├── shaders/
 │   └── stacks.yaml
 └── my_pack/          ← add your own
