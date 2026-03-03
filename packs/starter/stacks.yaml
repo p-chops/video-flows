@@ -1,0 +1,50 @@
+stacks:
+  starter_glow:
+    shaders: [starter_glow]
+    shader_params:
+      starter_glow:
+        glow_strength: [0.3, 0.8]
+        hue: [0.0, 1.0]
+
+  mosaic_glow:
+    shaders: [starter_mosaic, starter_glow]
+    shader_params:
+      starter_mosaic:
+        block_size: [0.01, 0.04]
+        color_levels: {choice: [4, 6, 8, 12]}
+      starter_glow:
+        glow_strength: [0.4, 0.9]
+        hue: [0.0, 1.0]
+
+  split_invert:
+    shaders: [starter_shift, starter_invert_luma]
+    shader_params:
+      starter_shift:
+        amount: [0.005, 0.03]
+        angle: [0.0, 6.28]
+      starter_invert_luma:
+        mix_amount: [0.5, 1.0]
+        threshold: [0.2, 0.6]
+
+  chunky_shift:
+    shaders: [starter_mosaic, starter_shift]
+    shader_params:
+      starter_mosaic:
+        block_size: [0.02, 0.06]
+        color_levels: {choice: [3, 4, 5, 6]}
+      starter_shift:
+        amount: [0.01, 0.04]
+        angle: [0.0, 6.28]
+
+  glow_invert:
+    shaders: [starter_glow, starter_invert_luma, starter_shift]
+    shader_params:
+      starter_glow:
+        glow_strength: [0.5, 1.0]
+        hue: [0.0, 1.0]
+      starter_invert_luma:
+        mix_amount: [0.3, 0.8]
+        threshold: [0.3, 0.7]
+      starter_shift:
+        amount: [0.003, 0.015]
+        angle: [0.0, 6.28]
