@@ -111,16 +111,7 @@ def _plan_shows(
 
     reel_seed = seed or rng.randint(0, 2**31)
 
-    # When source footage is provided, match its resolution so all shows
-    # (footage and generator) share the same dimensions for transitions.
-    # If src is a directory, keep the explicit width/height (default 1280×720)
-    # since files may have mixed resolutions.
     is_src_dir = src is not None and src.is_dir()
-    if src and not is_src_dir:
-        from ..ffmpeg import probe as ffprobe
-        src_info = ffprobe(src, c)
-        width = src_info.width
-        height = src_info.height
 
     print(f"═══ Show Reel (seed={reel_seed}) ═══")
     print(f"    {n_shows} shows, {min_dur}–{max_dur}s each")
@@ -176,9 +167,9 @@ def _plan_shows(
             use_transitions=False,
             seed=show_seed,
             archetype=archetype,
+            width=width,
+            height=height,
         )
-        recipe.width = width
-        recipe.height = height
 
         _fixup_recipe_sources(recipe, dur, rng)
 
@@ -328,9 +319,9 @@ def show_reel_render(
                 use_transitions=False,
                 seed=new_seed,
                 archetype=archetype_hint,
+                width=width,
+                height=height,
             )
-            new_recipe.width = width
-            new_recipe.height = height
             _fixup_recipe_sources(new_recipe, show["duration"], reroll_rng)
 
             new_show = dict(

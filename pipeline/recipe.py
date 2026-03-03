@@ -2532,7 +2532,6 @@ def _build_hybrid(
     recipe.composite = MaskedComposite(
         mask_type=rng.choice(["motion", "gradient"]),
     )
-    recipe.width, recipe.height = 1280, 720
     return recipe
 
 
@@ -2966,6 +2965,8 @@ def random_recipe(
     use_generators: Optional[bool] = None,
     seed: Optional[int] = None,
     archetype: Optional[str] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
 ) -> BrainWipeRecipe:
     """Procedurally generate a recipe from all available components.
 
@@ -3006,9 +3007,17 @@ def random_recipe(
         archetype = rng.choice(eligible_names)
         builder = _ARCHETYPES[archetype][0]
 
-    return builder(
+    recipe = builder(
         rng, complexity, src,
         n_lanes=n_lanes, n_steps=n_steps, n_segments=n_segments,
         use_transitions=use_transitions, use_generators=use_generators,
         target_dur=target_dur, seed=seed,
     )
+
+    # Explicit width/height override the builder's defaults
+    if width is not None:
+        recipe.width = width
+    if height is not None:
+        recipe.height = height
+
+    return recipe
