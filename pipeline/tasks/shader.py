@@ -117,13 +117,17 @@ def _apply_shader_stack(
 
                 if shader.is_multipass and (buffers or temp_targets):
                     # Multi-pass: render through buffer FBOs
+                    n_passes = len(shader.passes)
+                    wrote_chain = False
                     for pass_idx, pass_info in enumerate(shader.passes):
+                        is_last = (pass_idx == n_passes - 1)
                         if pass_info.target and pass_info.target in buffers:
                             buffers[pass_info.target].write_slot.fbo.use()
                         elif pass_info.target and pass_info.target in temp_targets:
                             temp_targets[pass_info.target].fbo.use()
                         else:
                             write_fbo.fbo.use()
+                            wrote_chain = True
 
                         if "u_passindex" in prog:
                             prog["u_passindex"] = pass_idx
@@ -151,6 +155,19 @@ def _apply_shader_stack(
 
                         if pass_info.target and pass_info.target in buffers:
                             buffers[pass_info.target].swap()
+
+                    # ISF convention: last pass output goes to screen/chain.
+                    # If all passes wrote to buffers, copy the last pass's
+                    # buffer content to write_fbo so downstream shaders see it.
+                    if not wrote_chain:
+                        last_pass = shader.passes[-1]
+                        if last_pass.target and last_pass.target in buffers:
+                            src_fbo = buffers[last_pass.target].slots[
+                                buffers[last_pass.target].read_idx].fbo
+                            gl.ctx.copy_framebuffer(write_fbo.fbo, src_fbo)
+                        elif last_pass.target and last_pass.target in temp_targets:
+                            src_fbo = temp_targets[last_pass.target].fbo
+                            gl.ctx.copy_framebuffer(write_fbo.fbo, src_fbo)
                 else:
                     # Single-pass
                     write_fbo.fbo.use()
