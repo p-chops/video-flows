@@ -86,7 +86,6 @@ def _concat_channel(pieces: list[Path], ch_out: Path,
       task_runner=ConcurrentTaskRunner(max_workers=4))
 def stooges_channels(
     src: Path,
-    shader_dir: Optional[Path] = None,
     n_channels: int = 4,
     static_duration: float = 0.3,
     shuffle: bool = True,
@@ -114,7 +113,6 @@ def stooges_channels(
     Parameters
     ----------
     src             : source footage
-    shader_dir      : ISF shader directory (defaults to cfg.shader_dir)
     n_channels      : number of output files (default 4)
     static_duration : length of each static burst in seconds (default 0.3)
     shuffle         : shuffle segment order per channel (default True)
@@ -130,7 +128,6 @@ def stooges_channels(
     """
     c = cfg or Config()
     c.ensure_dirs()
-    s_dir = shader_dir or c.shader_dir
 
     out_dir = output_dir or c.output_dir / "channels"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -148,11 +145,13 @@ def stooges_channels(
 
     # ── Load shader library (once; shared read-only across threads) ───────────
 
-    all_shaders = load_shader_dir(s_dir)
+    all_shaders = {}
+    for s_dir in c.pack_shader_dirs():
+        all_shaders.update(load_shader_dir(s_dir))
     if not all_shaders:
-        raise ValueError(f"No .fs shaders found in {s_dir}")
+        raise ValueError("No .fs shaders found in any pack (packs/*/shaders/)")
     shader_names = list(all_shaders.keys())
-    print(f"Shader library: {len(all_shaders)} shaders in {s_dir}")
+    print(f"Shader library: {len(all_shaders)} shaders from {len(c.pack_shader_dirs())} pack(s)")
 
     # ── Resolve per-channel segment counts ───────────────────────────────────
 
@@ -307,7 +306,8 @@ def _cli():
     )
     parser.add_argument("src", type=Path,
                         help="Source footage (e.g. tooth_will_out.mp4)")
-    parser.add_argument("--shader-dir", type=Path, default=None)
+    parser.add_argument("--pack", action="append", dest="packs",
+                        help="Restrict to specific shader packs (repeatable)")
     parser.add_argument("-n", "--n-channels", type=int, default=4,
                         help="Number of channel files to produce (default: 4)")
     parser.add_argument("--static-duration", type=float, default=0.3,
@@ -331,12 +331,11 @@ def _cli():
     parser.add_argument("-o", "--output-dir", type=Path, default=None)
 
     args = parser.parse_args()
-    cfg = Config()
+    cfg = Config(packs=args.packs)
     cfg.ensure_dirs()
 
     channels = stooges_channels(
         src=args.src,
-        shader_dir=args.shader_dir,
         n_channels=args.n_channels,
         static_duration=args.static_duration,
         shuffle=args.shuffle,
