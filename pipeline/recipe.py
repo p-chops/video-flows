@@ -18,12 +18,15 @@ Extending with new step types (from labs):
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import random as _random_mod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+
+from .registry import get_entry, get_entry_for_step, pool_entries, register_step
 
 
 # ─── Source specs ─────────────────────────────────────────────────────────────
@@ -284,6 +287,102 @@ Step = (CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep
         | TemporalDisplaceStep | SpectralRemixStep | PhaseScrambleStep)
 
 
+# ─── Time effect registration ────────────────────────────────────────────────
+# Each register_step() call tells the registry: name, class, seedless flag,
+# whether it's in the random pool, and (if so) how to generate random params.
+
+def _random_feedback_transform(rng, complexity):
+    xform = rng.choice(["zoom", "rotate", "spiral", "shift"])
+    if xform == "zoom":
+        amt = rng.uniform(0.005, 0.03)
+    elif xform == "rotate":
+        amt = rng.uniform(0.01, 0.05)
+    elif xform == "spiral":
+        amt = rng.uniform(0.005, 0.02)
+    else:  # shift
+        amt = rng.uniform(0.005, 0.02)
+    return FeedbackTransformStep(transform=xform, amount=amt, mix=rng.uniform(0.3, 0.55))
+
+def _random_temporal_fft(rng, complexity):
+    ft = rng.choice(["low_pass", "high_pass", "band_pass", "notch"])
+    if ft == "low_pass":
+        cl = rng.uniform(0.02, 0.10)
+    elif ft == "high_pass":
+        cl = rng.uniform(0.3, 0.6)
+    elif ft == "band_pass":
+        cl = rng.uniform(0.05, 0.3)
+        ch = rng.uniform(cl + 0.03, cl + 0.10)
+    else:  # notch
+        cl = rng.uniform(0.03, 0.10)
+        ch = rng.uniform(0.6, 0.9)
+    if ft in ("low_pass", "high_pass"):
+        ch = 0.5  # unused but keep valid
+    return TemporalFFTStep(filter_type=ft, cutoff_low=cl, cutoff_high=ch, preserve_dc=True)
+
+register_step("scrub", ScrubStep, random_fn=lambda rng, c: ScrubStep(
+    smoothness=rng.uniform(1.0, 4.0),
+    intensity=rng.uniform(0.2 + c * 0.3, 0.4 + c * 0.5)))
+register_step("drift", DriftStep, random_fn=lambda rng, c: DriftStep(
+    loop_dur=rng.uniform(1.0, 2.0 + c * 2.0)))
+register_step("pingpong", PingPongStep, random_fn=lambda rng, c: PingPongStep(
+    window=rng.uniform(1.0, 2.0 + c * 2.0)))
+register_step("echo", EchoStep, seedless=True, random_fn=lambda rng, c: EchoStep(
+    delay=0.0 if rng.random() < 0.4 else rng.uniform(0.02, 0.3),
+    trail=rng.uniform(0.3, 0.6)))
+register_step("patch", PatchStep, in_pool=False)
+register_step("slit_scan", SlitScanStep, random_fn=lambda rng, c: SlitScanStep(
+    axis=rng.choice(["horizontal", "vertical"]),
+    scan_speed=rng.uniform(0.3, 1.0 + c)))
+register_step("temporal_tile", TemporalTileStep, random_fn=lambda rng, c: TemporalTileStep(
+    grid=rng.choice([3, 4, 5, 6]),
+    offset_scale=rng.uniform(0.3, 1.0)))
+register_step("smear", SmearStep, seedless=True, in_pool=False)
+register_step("bloom", BloomStep, seedless=True, in_pool=False)
+register_step("stack", StackStep, seedless=True, random_fn=lambda rng, c: StackStep(
+    window=rng.choice([4, 6, 8, 12, 16]),
+    mode=rng.choice(["mean", "mean", "max", "min"])))
+register_step("slip", SlipStep, random_fn=lambda rng, c: SlipStep(
+    n_bands=rng.choice([4, 6, 8, 12]),
+    max_slip=rng.uniform(0.2, 0.5 + c * 0.3),
+    axis=rng.choice(["horizontal", "vertical"])))
+register_step("flow_warp", FlowWarpStep, random_fn=lambda rng, c: FlowWarpStep(
+    amplify=rng.uniform(1.5, 3.0 + c * 4.0),
+    smooth=rng.choice([9, 15, 21, 31])))
+register_step("temporal_sort", TemporalSortStep, random_fn=lambda rng, c: TemporalSortStep(
+    mode=rng.choice(["luminance", "luminance", "red", "green", "blue"]),
+    direction=rng.choice(["ascending", "descending"])))
+register_step("extrema_hold", ExtremaHoldStep, in_pool=False)
+register_step("feedback_transform", FeedbackTransformStep, random_fn=_random_feedback_transform)
+register_step("quad_loop", QuadLoopStep, random_fn=lambda rng, c: QuadLoopStep(
+    loop_dur=rng.uniform(1.0, 3.0),
+    offset_scale=rng.uniform(0.2, 0.8),
+    layout=rng.choice(["grid_2x2", "horizontal_bands", "vertical_bands"])))
+register_step("scan_refresh", ScanRefreshStep, seedless=True, random_fn=lambda rng, c: ScanRefreshStep(
+    speed=rng.uniform(1.0, 3.0 + c * 4.0),
+    decay=rng.uniform(0.8, 2.0 + c * 1.0),
+    beam_width=rng.uniform(0.02, 0.08),
+    axis=rng.choice(["horizontal", "vertical"])))
+register_step("temporal_fft", TemporalFFTStep, random_fn=_random_temporal_fft)
+register_step("temporal_gradient", TemporalGradientStep, seedless=True, random_fn=lambda rng, c: TemporalGradientStep(
+    order=rng.choice([1, 1, 1, 2])))
+register_step("temporal_median", TemporalMedianStep, seedless=True, random_fn=lambda rng, c: TemporalMedianStep(
+    window=rng.choice([5, 7, 9, 11, 15, 21, 31])))
+register_step("axis_swap", AxisSwapStep, seedless=True, random_fn=lambda rng, c: AxisSwapStep(
+    axis=rng.choice(["horizontal", "vertical"])))
+register_step("temporal_morph", TemporalMorphStep, seedless=True, random_fn=lambda rng, c: TemporalMorphStep(
+    operation=rng.choice(["dilate", "erode", "open", "close"]),
+    window=rng.choice([3, 5, 7, 9, 11, 15])))
+register_step("depth_slice", DepthSliceStep, seedless=True, random_fn=lambda rng, c: DepthSliceStep(
+    angle=rng.uniform(10.0, 80.0),
+    axis=rng.choice(["horizontal", "vertical"])))
+register_step("temporal_equalize", TemporalEqualizeStep, seedless=True, in_pool=False)
+register_step("temporal_displace", TemporalDisplaceStep, random_fn=lambda rng, c: TemporalDisplaceStep(
+    amount=rng.uniform(0.1, 0.5 + c * 0.5),
+    channel=rng.choice(["luma", "r", "g", "b"])))
+register_step("spectral_remix", SpectralRemixStep, in_pool=False)
+register_step("phase_scramble", PhaseScrambleStep, in_pool=False)
+
+
 # ─── Transitions ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -498,37 +597,10 @@ def _recipe_to_hashable(recipe: BrainWipeRecipe) -> str:
                         "n": s.n_shaders, "cats": s.categories}
             case NormalizeStep():
                 return {"type": "normalize", "bp": s.black_point, "wp": s.white_point}
-            case ScrubStep():
-                return {"type": "scrub", "smoothness": s.smoothness,
-                        "intensity": s.intensity}
-            case DriftStep():
-                return {"type": "drift", "loop_dur": s.loop_dur, "drift": s.drift}
-            case PingPongStep():
-                return {"type": "pingpong", "window": s.window}
-            case EchoStep():
-                return {"type": "echo", "delay": s.delay, "trail": s.trail}
-            case PatchStep():
-                return {"type": "patch", "patch_min": s.patch_min,
-                        "patch_max": s.patch_max}
-            case SlitScanStep():
-                return {"type": "slit_scan", "axis": s.axis,
-                        "scan_speed": s.scan_speed}
-            case TemporalTileStep():
-                return {"type": "temporal_tile", "grid": s.grid,
-                        "offset_scale": s.offset_scale}
-            case SmearStep():
-                return {"type": "smear", "threshold": s.threshold}
-            case BloomStep():
-                return {"type": "bloom", "sensitivity": s.sensitivity}
-            case StackStep():
-                return {"type": "stack", "window": s.window, "mode": s.mode}
-            case SlipStep():
-                return {"type": "slip", "n_bands": s.n_bands,
-                        "max_slip": s.max_slip, "axis": s.axis}
-            case QuadLoopStep():
-                return {"type": "quad_loop", "loop_dur": s.loop_dur,
-                        "offset_scale": s.offset_scale, "layout": s.layout}
             case _:
+                entry = get_entry_for_step(s)
+                if entry is not None:
+                    return {"type": entry.name, **dataclasses.asdict(s)}
                 return {"type": type(s).__name__}
 
     def _source_dict(src: SourceSpec) -> dict:
@@ -576,6 +648,7 @@ def hash_recipe(recipe: BrainWipeRecipe) -> str:
 # ─── Serialization ───────────────────────────────────────────────────────────
 
 def _step_to_dict(s: Step) -> dict:
+    # Non-time steps with custom serialization
     match s:
         case CrushStep():
             return {"type": "crush", "crush": s.crush,
@@ -591,33 +664,6 @@ def _step_to_dict(s: Step) -> dict:
         case NormalizeStep():
             return {"type": "normalize", "black_point": s.black_point,
                     "white_point": s.white_point}
-        case ScrubStep():
-            return {"type": "scrub", "smoothness": s.smoothness,
-                    "intensity": s.intensity}
-        case DriftStep():
-            return {"type": "drift", "loop_dur": s.loop_dur, "drift": s.drift}
-        case PingPongStep():
-            return {"type": "pingpong", "window": s.window}
-        case EchoStep():
-            return {"type": "echo", "delay": s.delay, "trail": s.trail}
-        case PatchStep():
-            return {"type": "patch", "patch_min": s.patch_min,
-                    "patch_max": s.patch_max}
-        case SlitScanStep():
-            return {"type": "slit_scan", "axis": s.axis,
-                    "scan_speed": s.scan_speed}
-        case TemporalTileStep():
-            return {"type": "temporal_tile", "grid": s.grid,
-                    "offset_scale": s.offset_scale}
-        case SmearStep():
-            return {"type": "smear", "threshold": s.threshold}
-        case BloomStep():
-            return {"type": "bloom", "sensitivity": s.sensitivity}
-        case StackStep():
-            return {"type": "stack", "window": s.window, "mode": s.mode}
-        case SlipStep():
-            return {"type": "slip", "n_bands": s.n_bands,
-                    "max_slip": s.max_slip, "axis": s.axis}
         case MirrorStep():
             return {"type": "mirror", "axis": s.axis}
         case ZoomStep():
@@ -629,53 +675,18 @@ def _step_to_dict(s: Step) -> dict:
             return {"type": "hue_shift", "degrees": s.degrees}
         case SaturateStep():
             return {"type": "saturate", "amount": s.amount}
-        case FlowWarpStep():
-            return {"type": "flow_warp", "amplify": s.amplify, "smooth": s.smooth}
-        case TemporalSortStep():
-            return {"type": "temporal_sort", "mode": s.mode, "direction": s.direction}
-        case ExtremaHoldStep():
-            return {"type": "extrema_hold", "mode": s.mode, "decay": s.decay}
-        case FeedbackTransformStep():
-            return {"type": "feedback_transform", "transform": s.transform,
-                    "amount": s.amount, "mix": s.mix}
-        case QuadLoopStep():
-            return {"type": "quad_loop", "loop_dur": s.loop_dur,
-                    "offset_scale": s.offset_scale, "layout": s.layout}
-        case ScanRefreshStep():
-            return {"type": "scan_refresh", "speed": s.speed,
-                    "decay": s.decay, "beam_width": s.beam_width,
-                    "axis": s.axis}
-        case TemporalFFTStep():
-            return {"type": "temporal_fft", "filter_type": s.filter_type,
-                    "cutoff_low": s.cutoff_low, "cutoff_high": s.cutoff_high,
-                    "preserve_dc": s.preserve_dc}
-        case TemporalGradientStep():
-            return {"type": "temporal_gradient", "order": s.order}
-        case TemporalMedianStep():
-            return {"type": "temporal_median", "window": s.window}
-        case AxisSwapStep():
-            return {"type": "axis_swap", "axis": s.axis}
-        case TemporalMorphStep():
-            return {"type": "temporal_morph", "operation": s.operation,
-                    "window": s.window}
-        case DepthSliceStep():
-            return {"type": "depth_slice", "angle": s.angle, "axis": s.axis}
-        case TemporalEqualizeStep():
-            return {"type": "temporal_equalize", "strength": s.strength}
-        case TemporalDisplaceStep():
-            return {"type": "temporal_displace", "amount": s.amount,
-                    "channel": s.channel}
-        case SpectralRemixStep():
-            return {"type": "spectral_remix", "mode": s.mode,
-                    "amount": s.amount}
-        case PhaseScrambleStep():
-            return {"type": "phase_scramble", "amount": s.amount}
         case _:
-            raise ValueError(f"Unknown step type: {type(s).__name__}")
+            pass
+    # Time effects — generic via registry + dataclasses.asdict
+    entry = get_entry_for_step(s)
+    if entry is not None:
+        return {"type": entry.name, **dataclasses.asdict(s)}
+    raise ValueError(f"Unknown step type: {type(s).__name__}")
 
 
 def _step_from_dict(d: dict) -> Step:
     t = d["type"]
+    # Non-time steps with custom deserialization
     if t == "crush":
         return CrushStep(crush=d["crush"], codec=d["codec"],
                          downscale=d.get("downscale", 1.0))
@@ -689,32 +700,6 @@ def _step_from_dict(d: dict) -> Step:
     elif t == "normalize":
         return NormalizeStep(black_point=d.get("black_point", 0.01),
                              white_point=d.get("white_point", 0.99))
-    elif t == "scrub":
-        return ScrubStep(smoothness=d["smoothness"], intensity=d["intensity"])
-    elif t == "drift":
-        return DriftStep(loop_dur=d["loop_dur"], drift=d.get("drift"))
-    elif t == "pingpong":
-        return PingPongStep(window=d["window"])
-    elif t == "echo":
-        return EchoStep(delay=d["delay"], trail=d["trail"])
-    elif t == "patch":
-        return PatchStep(patch_min=d["patch_min"], patch_max=d["patch_max"])
-    elif t == "slit_scan":
-        return SlitScanStep(axis=d.get("axis", "horizontal"),
-                            scan_speed=d.get("scan_speed", 1.0))
-    elif t == "temporal_tile":
-        return TemporalTileStep(grid=d.get("grid", 4),
-                                offset_scale=d.get("offset_scale", 1.0))
-    elif t == "smear":
-        return SmearStep(threshold=d.get("threshold", 0.1))
-    elif t == "bloom":
-        return BloomStep(sensitivity=d.get("sensitivity", 0.1))
-    elif t == "stack":
-        return StackStep(window=d.get("window", 8), mode=d.get("mode", "mean"))
-    elif t == "slip":
-        return SlipStep(n_bands=d.get("n_bands", 8),
-                        max_slip=d.get("max_slip", 0.5),
-                        axis=d.get("axis", "horizontal"))
     elif t == "mirror":
         return MirrorStep(axis=d.get("axis", "horizontal"))
     elif t == "zoom":
@@ -727,57 +712,12 @@ def _step_from_dict(d: dict) -> Step:
         return HueShiftStep(degrees=d.get("degrees", 90.0))
     elif t == "saturate":
         return SaturateStep(amount=d.get("amount", 2.0))
-    elif t == "flow_warp":
-        return FlowWarpStep(amplify=d.get("amplify", 3.0),
-                            smooth=d.get("smooth", 15))
-    elif t == "temporal_sort":
-        return TemporalSortStep(mode=d.get("mode", "luminance"),
-                                direction=d.get("direction", "ascending"))
-    elif t == "extrema_hold":
-        return ExtremaHoldStep(mode=d.get("mode", "max"),
-                               decay=d.get("decay", 0.0))
-    elif t == "feedback_transform":
-        return FeedbackTransformStep(transform=d.get("transform", "zoom"),
-                                     amount=d.get("amount", 0.02),
-                                     mix=d.get("mix", 0.7))
-    elif t == "quad_loop":
-        return QuadLoopStep(loop_dur=d.get("loop_dur", 1.0),
-                            offset_scale=d.get("offset_scale", 0.5),
-                            layout=d.get("layout", "grid_2x2"))
-    elif t == "scan_refresh":
-        return ScanRefreshStep(speed=d.get("speed", 0.5),
-                               decay=d.get("decay", 3.0),
-                               beam_width=d.get("beam_width", 0.02),
-                               axis=d.get("axis", "horizontal"))
-    elif t == "temporal_fft":
-        return TemporalFFTStep(filter_type=d.get("filter_type", "low_pass"),
-                               cutoff_low=d.get("cutoff_low", 0.1),
-                               cutoff_high=d.get("cutoff_high", 0.5),
-                               preserve_dc=d.get("preserve_dc", True))
-    elif t == "temporal_gradient":
-        return TemporalGradientStep(order=d.get("order", 1))
-    elif t == "temporal_median":
-        return TemporalMedianStep(window=d.get("window", 7))
-    elif t == "axis_swap":
-        return AxisSwapStep(axis=d.get("axis", "horizontal"))
-    elif t == "temporal_morph":
-        return TemporalMorphStep(operation=d.get("operation", "dilate"),
-                                  window=d.get("window", 5))
-    elif t == "depth_slice":
-        return DepthSliceStep(angle=d.get("angle", 45.0),
-                               axis=d.get("axis", "horizontal"))
-    elif t == "temporal_equalize":
-        return TemporalEqualizeStep(strength=d.get("strength", 1.0))
-    elif t == "temporal_displace":
-        return TemporalDisplaceStep(amount=d.get("amount", 0.5),
-                                     channel=d.get("channel", "luma"))
-    elif t == "spectral_remix":
-        return SpectralRemixStep(mode=d.get("mode", "swap"),
-                                      amount=d.get("amount", 0.3))
-    elif t == "phase_scramble":
-        return PhaseScrambleStep(amount=d.get("amount", 1.0))
-    else:
-        raise ValueError(f"Unknown step type: {t}")
+    # Time effects — generic via registry constructor
+    entry = get_entry(t)
+    if entry is not None:
+        fields = {k: v for k, v in d.items() if k != "type"}
+        return entry.step_class(**fields)
+    raise ValueError(f"Unknown step type: {t}")
 
 
 def _source_to_dict(src: SourceSpec) -> dict:
@@ -2072,164 +2012,9 @@ def _make_lane(
 
 def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
     """Generate a random time-effect step with randomized parameters."""
-    cls = rng.choice([
-        ScrubStep, DriftStep, PingPongStep, EchoStep,
-        SlitScanStep, TemporalTileStep, QuadLoopStep,
-        StackStep, SlipStep,
-        FlowWarpStep, TemporalSortStep, FeedbackTransformStep,
-        ScanRefreshStep, TemporalFFTStep,
-        TemporalGradientStep, TemporalMedianStep, AxisSwapStep,
-        TemporalMorphStep, DepthSliceStep,
-        TemporalDisplaceStep,
-    ])
-    if cls is ScrubStep:
-        return ScrubStep(
-            smoothness=rng.uniform(1.0, 4.0),
-            intensity=rng.uniform(0.2 + complexity * 0.3, 0.4 + complexity * 0.5),
-        )
-    elif cls is DriftStep:
-        return DriftStep(loop_dur=rng.uniform(1.0, 2.0 + complexity * 2.0))
-    elif cls is PingPongStep:
-        return PingPongStep(window=rng.uniform(1.0, 2.0 + complexity * 2.0))
-    elif cls is EchoStep:
-        delay = 0.0 if rng.random() < 0.4 else rng.uniform(0.02, 0.3)
-        return EchoStep(delay=delay, trail=rng.uniform(0.3, 0.6))
-    elif cls is PatchStep:
-        mn = rng.uniform(0.03, 0.15)
-        return PatchStep(patch_min=mn, patch_max=rng.uniform(mn + 0.1, 0.5))
-    elif cls is SlitScanStep:
-        return SlitScanStep(
-            axis=rng.choice(["horizontal", "vertical"]),
-            scan_speed=rng.uniform(0.3, 1.0 + complexity),
-        )
-    elif cls is TemporalTileStep:
-        return TemporalTileStep(
-            grid=rng.choice([3, 4, 5, 6]),
-            offset_scale=rng.uniform(0.3, 1.0),
-        )
-    elif cls is SmearStep:
-        return SmearStep(threshold=rng.uniform(0.05, 0.15 + complexity * 0.2))
-    elif cls is BloomStep:
-        return BloomStep(sensitivity=rng.uniform(0.05, 0.15 + complexity * 0.1))
-    elif cls is StackStep:
-        return StackStep(
-            window=rng.choice([4, 6, 8, 12, 16]),
-            mode=rng.choice(["mean", "mean", "max", "min"]),  # bias toward mean
-        )
-    elif cls is SlipStep:
-        return SlipStep(
-            n_bands=rng.choice([4, 6, 8, 12]),
-            max_slip=rng.uniform(0.2, 0.5 + complexity * 0.3),
-            axis=rng.choice(["horizontal", "vertical"]),
-        )
-    elif cls is TemporalSortStep:
-        return TemporalSortStep(
-            mode=rng.choice(["luminance", "luminance", "red", "green", "blue"]),
-            direction=rng.choice(["ascending", "descending"]),
-        )
-    elif cls is ExtremaHoldStep:
-        return ExtremaHoldStep(
-            mode=rng.choice(["max", "max", "min", "both"]),
-            decay=rng.choice([0.0, 0.0, 0.005, 0.01, 0.02, 0.05]),
-        )
-    elif cls is FeedbackTransformStep:
-        xform = rng.choice(["zoom", "rotate", "spiral", "shift"])
-        if xform == "zoom":
-            amt = rng.uniform(0.005, 0.03)
-        elif xform == "rotate":
-            amt = rng.uniform(0.01, 0.05)
-        elif xform == "spiral":
-            amt = rng.uniform(0.005, 0.02)
-        else:  # shift
-            amt = rng.uniform(0.005, 0.02)
-        return FeedbackTransformStep(
-            transform=xform,
-            amount=amt,
-            mix=rng.uniform(0.3, 0.55),
-        )
-    elif cls is QuadLoopStep:
-        return QuadLoopStep(
-            loop_dur=rng.uniform(1.0, 3.0),
-            offset_scale=rng.uniform(0.2, 0.8),
-            layout=rng.choice(["grid_2x2", "horizontal_bands", "vertical_bands"]),
-        )
-    elif cls is ScanRefreshStep:
-        return ScanRefreshStep(
-            speed=rng.uniform(1.0, 3.0 + complexity * 4.0),
-            decay=rng.uniform(0.8, 2.0 + complexity * 1.0),
-            beam_width=rng.uniform(0.02, 0.08),
-            axis=rng.choice(["horizontal", "vertical"]),
-        )
-    elif cls is TemporalFFTStep:
-        ft = rng.choice(["low_pass", "high_pass", "band_pass", "notch"])
-        if ft == "low_pass":
-            # Aggressive — low cutoff = only glacial drift survives
-            cl = rng.uniform(0.02, 0.10)
-        elif ft == "high_pass":
-            # Aggressive — high cutoff = only fast flicker remains
-            cl = rng.uniform(0.3, 0.6)
-        elif ft == "band_pass":
-            # Narrow band — isolate one temporal rhythm
-            cl = rng.uniform(0.05, 0.3)
-            ch = rng.uniform(cl + 0.03, cl + 0.10)
-        else:  # notch
-            # Wide kill band — scoop out most of the temporal spectrum
-            cl = rng.uniform(0.03, 0.10)
-            ch = rng.uniform(0.6, 0.9)
-        # band_pass/notch set ch above; low_pass/high_pass don't use it
-        if ft in ("low_pass", "high_pass"):
-            ch = 0.5  # unused but keep valid
-        return TemporalFFTStep(
-            filter_type=ft,
-            cutoff_low=cl,
-            cutoff_high=ch,
-            preserve_dc=True,
-        )
-    elif cls is TemporalGradientStep:
-        return TemporalGradientStep(
-            order=rng.choice([1, 1, 1, 2]),  # bias toward 1st derivative
-        )
-    elif cls is TemporalMedianStep:
-        return TemporalMedianStep(
-            window=rng.choice([5, 7, 9, 11, 15, 21, 31]),
-        )
-    elif cls is AxisSwapStep:
-        return AxisSwapStep(
-            axis=rng.choice(["horizontal", "vertical"]),
-        )
-    elif cls is TemporalMorphStep:
-        return TemporalMorphStep(
-            operation=rng.choice(["dilate", "erode", "open", "close"]),
-            window=rng.choice([3, 5, 7, 9, 11, 15]),
-        )
-    elif cls is DepthSliceStep:
-        return DepthSliceStep(
-            angle=rng.uniform(10.0, 80.0),
-            axis=rng.choice(["horizontal", "vertical"]),
-        )
-    elif cls is TemporalEqualizeStep:
-        return TemporalEqualizeStep(
-            strength=rng.uniform(0.3, 1.0),
-        )
-    elif cls is TemporalDisplaceStep:
-        return TemporalDisplaceStep(
-            amount=rng.uniform(0.1, 0.5 + complexity * 0.5),
-            channel=rng.choice(["luma", "r", "g", "b"]),
-        )
-    elif cls is SpectralRemixStep:
-        return SpectralRemixStep(
-            mode=rng.choice(["swap", "rotate"]),
-            amount=rng.uniform(0.2, 0.4),
-        )
-    elif cls is PhaseScrambleStep:
-        return PhaseScrambleStep(
-            amount=rng.uniform(0.3, 0.7 + complexity * 0.3),
-        )
-    else:  # FlowWarpStep
-        return FlowWarpStep(
-            amplify=rng.uniform(1.5, 3.0 + complexity * 4.0),
-            smooth=rng.choice([9, 15, 21, 31]),
-        )
+    entries = pool_entries()
+    entry = rng.choice(entries)
+    return entry.random_fn(rng, complexity)
 
 
 def _shader_step(rng: _random_mod.Random, complexity: float = 0.5, n: Optional[int] = None) -> ShaderStep:

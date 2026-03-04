@@ -21,6 +21,7 @@ from prefect import task
 
 from ..config import Config
 from ..ffmpeg import FrameWriter, probe, read_frames
+from ..registry import get_entry_for_step, register_process
 
 
 logger = logging.getLogger(__name__)
@@ -2393,77 +2394,14 @@ def _apply_time_effect(
     seed: Optional[int],
 ) -> list[np.ndarray]:
     """Dispatch a recipe step dataclass to the corresponding _process_* helper."""
-    # Local imports to avoid circular dependency (recipe.py doesn't import time.py)
-    from ..recipe import (
-        ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
-        SlitScanStep, TemporalTileStep, QuadLoopStep,
-        SmearStep, BloomStep, StackStep, SlipStep,
-        FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
-        ScanRefreshStep, TemporalFFTStep,
-        TemporalGradientStep, TemporalMedianStep, AxisSwapStep,
-        TemporalMorphStep, DepthSliceStep, TemporalEqualizeStep,
-        TemporalDisplaceStep, SpectralRemixStep, PhaseScrambleStep,
-    )
-    match step:
-        case ScrubStep(smoothness=smoothness, intensity=intensity):
-            return _process_scrub(frames, fps, smoothness=smoothness, intensity=intensity, seed=seed)
-        case DriftStep(loop_dur=loop_dur, drift=drift):
-            return _process_drift(frames, fps, loop_dur=loop_dur, drift=drift, seed=seed)
-        case PingPongStep(window=window):
-            return _process_ping_pong(frames, fps, window=window, seed=seed)
-        case EchoStep(delay=delay, trail=trail):
-            return _process_echo(frames, fps, delay=delay, trail=trail)
-        case PatchStep(patch_min=patch_min, patch_max=patch_max):
-            return _process_patch(frames, fps, patch_min=patch_min, patch_max=patch_max, seed=seed)
-        case SlitScanStep(axis=axis, scan_speed=scan_speed):
-            return _process_slit_scan(frames, fps, axis=axis, scan_speed=scan_speed, seed=seed)
-        case TemporalTileStep(grid=grid, offset_scale=offset_scale):
-            return _process_temporal_tile(frames, fps, grid=grid, offset_scale=offset_scale, seed=seed)
-        case QuadLoopStep(loop_dur=loop_dur, offset_scale=offset_scale, layout=layout):
-            return _process_quad_loop(frames, fps, loop_dur=loop_dur, offset_scale=offset_scale, layout=layout, seed=seed)
-        case SmearStep(threshold=threshold):
-            return _process_smear(frames, fps, threshold=threshold)
-        case BloomStep(sensitivity=sensitivity):
-            return _process_bloom(frames, fps, sensitivity=sensitivity)
-        case StackStep(window=window, mode=mode):
-            return _process_frame_stack(frames, fps, window=window, mode=mode)
-        case SlipStep(n_bands=n_bands, max_slip=max_slip, axis=axis):
-            return _process_slip(frames, fps, n_bands=n_bands, max_slip=max_slip, axis=axis, seed=seed)
-        case FlowWarpStep(amplify=amplify, smooth=smooth):
-            return _process_flow_warp(frames, fps, amplify=amplify, smooth=smooth, seed=seed)
-        case TemporalSortStep(mode=mode, direction=direction):
-            return _process_temporal_sort(frames, fps, mode=mode, direction=direction, seed=seed)
-        case ExtremaHoldStep(mode=mode, decay=decay):
-            return _process_extrema_hold(frames, fps, mode=mode, decay=decay, seed=seed)
-        case FeedbackTransformStep(transform=xform, amount=amount, mix=mix_val):
-            return _process_feedback_transform(frames, fps, transform=xform, amount=amount, mix=mix_val, seed=seed)
-        case ScanRefreshStep(speed=speed, decay=decay, beam_width=beam_width, axis=axis):
-            return _process_scan_refresh(frames, fps, speed=speed, decay=decay, beam_width=beam_width, axis=axis, seed=seed)
-        case TemporalFFTStep(filter_type=ft, cutoff_low=cl, cutoff_high=ch,
-                             preserve_dc=pdc):
-            return _process_temporal_fft(frames, fps, filter_type=ft,
-                                         cutoff_low=cl, cutoff_high=ch,
-                                         preserve_dc=pdc, seed=seed)
-        case TemporalGradientStep(order=order):
-            return _process_temporal_gradient(frames, fps, order=order, seed=seed)
-        case TemporalMedianStep(window=window):
-            return _process_temporal_median(frames, fps, window=window, seed=seed)
-        case AxisSwapStep(axis=axis):
-            return _process_axis_swap(frames, fps, axis=axis, seed=seed)
-        case TemporalMorphStep(operation=operation, window=window):
-            return _process_temporal_morph(frames, fps, operation=operation, window=window, seed=seed)
-        case DepthSliceStep(angle=angle, axis=axis):
-            return _process_depth_slice(frames, fps, angle=angle, axis=axis, seed=seed)
-        case TemporalEqualizeStep(strength=strength):
-            return _process_temporal_equalize(frames, fps, strength=strength, seed=seed)
-        case TemporalDisplaceStep(amount=amount, channel=channel):
-            return _process_temporal_displace(frames, fps, amount=amount, channel=channel, seed=seed)
-        case SpectralRemixStep(mode=mode, amount=amount):
-            return _process_spectral_remix(frames, fps, mode=mode, amount=amount, seed=seed)
-        case PhaseScrambleStep(amount=amount):
-            return _process_phase_scramble(frames, fps, amount=amount, seed=seed)
-        case _:
-            raise ValueError(f"Not a time effect step: {type(step).__name__}")
+    import dataclasses
+    entry = get_entry_for_step(step)
+    if entry is None:
+        raise ValueError(f"Not a time effect step: {type(step).__name__}")
+    kwargs = dataclasses.asdict(step)
+    if not entry.seedless and seed is not None:
+        kwargs["seed"] = seed
+    return entry.process_fn(frames, fps, **kwargs)
 
 
 @task(name="fused-time-chain", tags=["ram-heavy"])
@@ -2516,3 +2454,33 @@ def fused_time_chain(
     finally:
         if isinstance(frames, FrameBuffer):
             frames.cleanup()
+
+
+# ─── Register process functions + task wrappers with the effect registry ──────
+register_process("scrub", _process_scrub, time_scrub)
+register_process("drift", _process_drift, drift_loop)
+register_process("pingpong", _process_ping_pong, ping_pong)
+register_process("echo", _process_echo, echo_trail)
+register_process("patch", _process_patch, time_patch)
+register_process("slit_scan", _process_slit_scan, slit_scan)
+register_process("temporal_tile", _process_temporal_tile, temporal_tile)
+register_process("smear", _process_smear, smear)
+register_process("bloom", _process_bloom, bloom)
+register_process("stack", _process_frame_stack, frame_stack)
+register_process("slip", _process_slip, slip)
+register_process("flow_warp", _process_flow_warp, flow_warp)
+register_process("temporal_sort", _process_temporal_sort, temporal_sort)
+register_process("extrema_hold", _process_extrema_hold, extrema_hold)
+register_process("feedback_transform", _process_feedback_transform, feedback_transform)
+register_process("quad_loop", _process_quad_loop, quad_loop)
+register_process("scan_refresh", _process_scan_refresh, scan_refresh)
+register_process("temporal_fft", _process_temporal_fft, temporal_fft)
+register_process("temporal_gradient", _process_temporal_gradient, temporal_gradient)
+register_process("temporal_median", _process_temporal_median, temporal_median)
+register_process("axis_swap", _process_axis_swap, axis_swap)
+register_process("temporal_morph", _process_temporal_morph, temporal_morph)
+register_process("depth_slice", _process_depth_slice, depth_slice)
+register_process("temporal_equalize", _process_temporal_equalize, temporal_equalize)
+register_process("temporal_displace", _process_temporal_displace, temporal_displace)
+register_process("spectral_remix", _process_spectral_remix, spectral_remix)
+register_process("phase_scramble", _process_phase_scramble, phase_scramble)

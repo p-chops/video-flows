@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import dataclasses
 import random
 import shutil
 import subprocess
@@ -67,6 +68,7 @@ from prefect.task_runners import ConcurrentTaskRunner
 from ..config import Config
 from ..ffmpeg import probe
 from ..isf import ISFShader, load_shader_dir
+from ..registry import get_entry_for_step, time_step_types, seedless_time_steps
 from ..recipe import (
     BrainWipeRecipe,
     FootageSource,
@@ -76,38 +78,11 @@ from ..recipe import (
     CrushStep,
     ShaderStep,
     NormalizeStep,
-    ScrubStep,
-    DriftStep,
-    PingPongStep,
-    EchoStep,
-    PatchStep,
-    SlitScanStep,
-    TemporalTileStep,
-    SmearStep,
-    BloomStep,
-    StackStep,
-    SlipStep,
     MirrorStep,
     ZoomStep,
     InvertStep,
     HueShiftStep,
     SaturateStep,
-    FlowWarpStep,
-    TemporalSortStep,
-    ExtremaHoldStep,
-    FeedbackTransformStep,
-    QuadLoopStep,
-    ScanRefreshStep,
-    TemporalFFTStep,
-    TemporalGradientStep,
-    TemporalMedianStep,
-    AxisSwapStep,
-    TemporalMorphStep,
-    DepthSliceStep,
-    TemporalEqualizeStep,
-    TemporalDisplaceStep,
-    SpectralRemixStep,
-    PhaseScrambleStep,
     BlendComposite,
     MaskedComposite,
     RandomComposite,
@@ -121,8 +96,6 @@ from ..tasks import (
     blend_layers,
     concat_clips,
     detect_cuts,
-    drift_loop,
-    echo_trail,
     edge_mask,
     generate_solid,
     generate_static,
@@ -131,40 +104,15 @@ from ..tasks import (
     masked_composite,
     motion_mask,
     normalize_levels,
-    ping_pong,
     random_segments,
     segment_at_cuts,
     shuffle_clips,
-    time_patch,
-    time_scrub,
     transition_sequence,
-    slit_scan,
-    temporal_tile,
-    quad_loop,
-    smear,
-    bloom,
-    frame_stack,
-    slip,
     mirror,
     zoom,
     invert,
     hue_shift,
     saturate,
-    flow_warp,
-    temporal_sort,
-    extrema_hold,
-    feedback_transform,
-    scan_refresh,
-    temporal_fft,
-    temporal_gradient,
-    temporal_median,
-    axis_swap,
-    temporal_morph,
-    depth_slice,
-    temporal_equalize,
-    temporal_displace,
-    spectral_remix,
-    phase_scramble,
     fused_time_chain,
 )
 
@@ -622,21 +570,9 @@ _MERGEABLE_TYPES = (
     MirrorStep, ZoomStep, InvertStep, HueShiftStep, SaturateStep, NormalizeStep,
 )
 
-_TIME_STEP_TYPES = (
-    ScrubStep, DriftStep, PingPongStep, EchoStep, PatchStep,
-    SlitScanStep, TemporalTileStep, QuadLoopStep,
-    SmearStep, BloomStep, StackStep, SlipStep,
-    FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
-    ScanRefreshStep, TemporalFFTStep,
-    TemporalGradientStep, TemporalMedianStep, AxisSwapStep,
-    TemporalMorphStep, DepthSliceStep, TemporalEqualizeStep,
-    TemporalDisplaceStep, SpectralRemixStep, PhaseScrambleStep,
-)
-
-# Time steps that don't consume a seed from the RNG in _submit_step
-_SEEDLESS_TIME_STEPS = (EchoStep, SmearStep, BloomStep, StackStep, ScanRefreshStep,
-                        TemporalGradientStep, TemporalMedianStep, AxisSwapStep,
-                        TemporalMorphStep, DepthSliceStep, TemporalEqualizeStep)
+# Derived from the time effect registry (populated at import time by recipe.py + time.py)
+_TIME_STEP_TYPES = time_step_types()
+_SEEDLESS_TIME_STEPS = seedless_time_steps()
 
 
 def _group_steps(recipe_steps: list) -> list[list]:
@@ -761,62 +697,6 @@ def _submit_step(
             return normalize_levels.submit(
                 src, dst, black_point=bp, white_point=wp, cfg=cfg,
             )
-        case ScrubStep(smoothness=smoothness, intensity=intensity):
-            return time_scrub.submit(
-                src, dst, smoothness=smoothness, intensity=intensity,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case DriftStep(loop_dur=loop_dur, drift=drift):
-            return drift_loop.submit(
-                src, dst, loop_dur=loop_dur, drift=drift,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case PingPongStep(window=window):
-            return ping_pong.submit(
-                src, dst, window=window,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case EchoStep(delay=delay, trail=trail):
-            return echo_trail.submit(
-                src, dst, delay=delay, trail=trail, cfg=cfg,
-            )
-        case PatchStep(patch_min=patch_min, patch_max=patch_max):
-            return time_patch.submit(
-                src, dst, patch_min=patch_min, patch_max=patch_max,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case SlitScanStep(axis=axis, scan_speed=scan_speed):
-            return slit_scan.submit(
-                src, dst, axis=axis, scan_speed=scan_speed,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case TemporalTileStep(grid=grid, offset_scale=offset_scale):
-            return temporal_tile.submit(
-                src, dst, grid=grid, offset_scale=offset_scale,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case QuadLoopStep(loop_dur=loop_dur, offset_scale=offset_scale, layout=layout):
-            return quad_loop.submit(
-                src, dst, loop_dur=loop_dur, offset_scale=offset_scale,
-                layout=layout, seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case SmearStep(threshold=threshold):
-            return smear.submit(
-                src, dst, threshold=threshold, cfg=cfg,
-            )
-        case BloomStep(sensitivity=sensitivity):
-            return bloom.submit(
-                src, dst, sensitivity=sensitivity, cfg=cfg,
-            )
-        case StackStep(window=window, mode=mode):
-            return frame_stack.submit(
-                src, dst, window=window, mode=mode, cfg=cfg,
-            )
-        case SlipStep(n_bands=n_bands, max_slip=max_slip, axis=axis):
-            return slip.submit(
-                src, dst, n_bands=n_bands, max_slip=max_slip, axis=axis,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
         case MirrorStep(axis=axis):
             return mirror.submit(src, dst, axis=axis, cfg=cfg)
         case ZoomStep(factor=factor, center_x=cx, center_y=cy):
@@ -829,78 +709,16 @@ def _submit_step(
             return hue_shift.submit(src, dst, degrees=degrees, cfg=cfg)
         case SaturateStep(amount=amount):
             return saturate.submit(src, dst, amount=amount, cfg=cfg)
-        case FlowWarpStep(amplify=amplify, smooth=smooth):
-            return flow_warp.submit(
-                src, dst, amplify=amplify, smooth=smooth,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case TemporalSortStep(mode=mode, direction=direction):
-            return temporal_sort.submit(
-                src, dst, mode=mode, direction=direction,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case ExtremaHoldStep(mode=mode, decay=decay):
-            return extrema_hold.submit(
-                src, dst, mode=mode, decay=decay,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case FeedbackTransformStep(transform=xform, amount=amount, mix=mix_val):
-            return feedback_transform.submit(
-                src, dst, transform=xform, amount=amount, mix=mix_val,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case ScanRefreshStep(speed=speed, decay=decay, beam_width=bw, axis=axis):
-            return scan_refresh.submit(
-                src, dst, speed=speed, decay=decay, beam_width=bw, axis=axis,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case TemporalFFTStep(filter_type=ft, cutoff_low=cl, cutoff_high=ch,
-                             preserve_dc=pdc):
-            return temporal_fft.submit(
-                src, dst, filter_type=ft, cutoff_low=cl, cutoff_high=ch,
-                preserve_dc=pdc, seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case TemporalGradientStep(order=order):
-            return temporal_gradient.submit(
-                src, dst, order=order, cfg=cfg,
-            )
-        case TemporalMedianStep(window=window):
-            return temporal_median.submit(
-                src, dst, window=window, cfg=cfg,
-            )
-        case AxisSwapStep(axis=axis):
-            return axis_swap.submit(
-                src, dst, axis=axis, cfg=cfg,
-            )
-        case TemporalMorphStep(operation=operation, window=window):
-            return temporal_morph.submit(
-                src, dst, operation=operation, window=window, cfg=cfg,
-            )
-        case DepthSliceStep(angle=angle, axis=axis):
-            return depth_slice.submit(
-                src, dst, angle=angle, axis=axis, cfg=cfg,
-            )
-        case TemporalEqualizeStep(strength=strength):
-            return temporal_equalize.submit(
-                src, dst, strength=strength, cfg=cfg,
-            )
-        case TemporalDisplaceStep(amount=amount, channel=channel):
-            return temporal_displace.submit(
-                src, dst, amount=amount, channel=channel,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case SpectralRemixStep(mode=mode, amount=amount):
-            return spectral_remix.submit(
-                src, dst, mode=mode, amount=amount,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
-        case PhaseScrambleStep(amount=amount):
-            return phase_scramble.submit(
-                src, dst, amount=amount,
-                seed=rng.randint(0, 2 ** 31), cfg=cfg,
-            )
         case _:
-            raise ValueError(f"Unknown step type: {type(step).__name__}")
+            pass
+    # Time effects — generic via registry
+    entry = get_entry_for_step(step)
+    if entry is not None:
+        kwargs = dataclasses.asdict(step)
+        if not entry.seedless:
+            kwargs["seed"] = rng.randint(0, 2 ** 31)
+        return entry.task_fn.submit(src, dst, **kwargs, cfg=cfg)
+    raise ValueError(f"Unknown step type: {type(step).__name__}")
 
 
 def _materialize_generator_source(
