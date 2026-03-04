@@ -232,10 +232,6 @@ class TemporalGradientStep:
     """Temporal gradient — per-pixel temporal derivative, only motion survives."""
     order: int = 1  # 1 = velocity, 2 = acceleration
 
-@dataclass
-class TemporalMedianStep:
-    """Temporal median — rolling median removes transient motion."""
-    window: int = 7  # median kernel size in frames (odd)
 
 @dataclass
 class AxisSwapStep:
@@ -276,15 +272,29 @@ class PhaseScrambleStep:
     """Phase scramble — randomize temporal phases, preserve magnitudes."""
     amount: float = 1.0
 
+@dataclass
+class DatamoshStep:
+    """Simulated datamosh — freeze reference, warp with optical flow."""
+    refresh_interval: int = 30
+    blend: float = 0.0
+
+@dataclass
+class FrameQuantizeStep:
+    """Frame quantize — reduce to K representative frames."""
+    n_levels: int = 30
+    mode: str = "luminance"
+
+
 Step = (CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep
         | PingPongStep | EchoStep | PatchStep | SlitScanStep | TemporalTileStep
         | SmearStep | BloomStep | StackStep | SlipStep
         | MirrorStep | ZoomStep | InvertStep | HueShiftStep | SaturateStep
         | FlowWarpStep | TemporalSortStep | ExtremaHoldStep | FeedbackTransformStep
         | QuadLoopStep | ScanRefreshStep | TemporalFFTStep
-        | TemporalGradientStep | TemporalMedianStep | AxisSwapStep
+        | TemporalGradientStep | AxisSwapStep
         | TemporalMorphStep | DepthSliceStep | TemporalEqualizeStep
-        | TemporalDisplaceStep | SpectralRemixStep | PhaseScrambleStep)
+        | TemporalDisplaceStep | SpectralRemixStep | PhaseScrambleStep
+        | DatamoshStep | FrameQuantizeStep)
 
 
 # ─── Time effect registration ────────────────────────────────────────────────
@@ -365,8 +375,6 @@ register_step("scan_refresh", ScanRefreshStep, seedless=True, random_fn=lambda r
 register_step("temporal_fft", TemporalFFTStep, random_fn=_random_temporal_fft)
 register_step("temporal_gradient", TemporalGradientStep, seedless=True, random_fn=lambda rng, c: TemporalGradientStep(
     order=rng.choice([1, 1, 1, 2])))
-register_step("temporal_median", TemporalMedianStep, seedless=True, random_fn=lambda rng, c: TemporalMedianStep(
-    window=rng.choice([5, 7, 9, 11, 15, 21, 31])))
 register_step("axis_swap", AxisSwapStep, seedless=True, random_fn=lambda rng, c: AxisSwapStep(
     axis=rng.choice(["horizontal", "vertical"])))
 register_step("temporal_morph", TemporalMorphStep, seedless=True, random_fn=lambda rng, c: TemporalMorphStep(
@@ -381,6 +389,12 @@ register_step("temporal_displace", TemporalDisplaceStep, random_fn=lambda rng, c
     channel=rng.choice(["luma", "r", "g", "b"])))
 register_step("spectral_remix", SpectralRemixStep, in_pool=False)
 register_step("phase_scramble", PhaseScrambleStep, in_pool=False)
+register_step("datamosh", DatamoshStep, random_fn=lambda rng, c: DatamoshStep(
+    refresh_interval=rng.choice([15, 30, 45, 60, 90]),
+    blend=rng.uniform(0.0, 0.3)))
+register_step("frame_quantize", FrameQuantizeStep, seedless=True, random_fn=lambda rng, c: FrameQuantizeStep(
+    n_levels=rng.choice([16, 20, 30, 40, 50]),
+    mode=rng.choice(["luminance", "color"])))
 
 
 # ─── Transitions ──────────────────────────────────────────────────────────────
@@ -2641,7 +2655,6 @@ _TIME_EFFECT_TYPES: dict[str, type] = {
     "scan_refresh": ScanRefreshStep,
     "temporal_fft": TemporalFFTStep,
     "temporal_gradient": TemporalGradientStep,
-    "temporal_median": TemporalMedianStep,
     "axis_swap": AxisSwapStep,
 }
 

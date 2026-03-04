@@ -34,9 +34,10 @@ from prefect import flow
 from ..config import Config
 from ..tasks.time import (
     drift_loop, echo_trail, ping_pong, time_patch, time_scrub, temporal_fft,
-    temporal_gradient, temporal_median, axis_swap,
+    temporal_gradient, axis_swap,
     temporal_morph, depth_slice, temporal_equalize,
     temporal_displace, spectral_remix, phase_scramble,
+    datamosh, frame_quantize,
 )
 
 
@@ -158,20 +159,6 @@ def time_lab_temporal_gradient(
     return temporal_gradient(src, out, order=order, seed=seed, cfg=c)
 
 
-@flow(name="time-lab-temporal-median", log_prints=True)
-def time_lab_temporal_median(
-    src: Path,
-    output: Optional[Path] = None,
-    window: int = 7,
-    seed: Optional[int] = None,
-    cfg: Optional[Config] = None,
-) -> Path:
-    """Temporal median — rolling median removes transient motion."""
-    c = cfg or Config()
-    c.ensure_dirs()
-    out = output or c.output_dir / "temporal_median.mp4"
-    return temporal_median(src, out, window=window, seed=seed, cfg=c)
-
 
 @flow(name="time-lab-axis-swap", log_prints=True)
 def time_lab_axis_swap(
@@ -280,6 +267,39 @@ def time_lab_phase_scramble(
     c.ensure_dirs()
     out = output or c.output_dir / "phase_scramble.mp4"
     return phase_scramble(src, out, amount=amount, seed=seed, cfg=c)
+
+
+@flow(name="time-lab-datamosh", log_prints=True)
+def time_lab_datamosh(
+    src: Path,
+    output: Optional[Path] = None,
+    refresh_interval: int = 30,
+    blend: float = 0.0,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Simulated datamosh — freeze reference, warp with optical flow."""
+    c = cfg or Config()
+    c.ensure_dirs()
+    out = output or c.output_dir / "datamosh.mp4"
+    return datamosh(src, out, refresh_interval=refresh_interval, blend=blend, seed=seed, cfg=c)
+
+
+@flow(name="time-lab-frame-quantize", log_prints=True)
+def time_lab_frame_quantize(
+    src: Path,
+    output: Optional[Path] = None,
+    n_levels: int = 8,
+    mode: str = "luminance",
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Frame quantize — reduce to K representative frames."""
+    c = cfg or Config()
+    c.ensure_dirs()
+    out = output or c.output_dir / "frame_quantize.mp4"
+    return frame_quantize(src, out, n_levels=n_levels, mode=mode, seed=seed, cfg=c)
+
 
 
 # Keep backward-compatible alias
@@ -393,18 +413,6 @@ def _cli():
     p_grad.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducibility")
 
-    # --- temporal-median ---
-    p_med = sub.add_parser("temporal-median",
-                           help="Temporal median — removes transient motion")
-    p_med.add_argument("src", type=Path,
-                       help="Source video file")
-    p_med.add_argument("-o", "--output", type=Path, default=None,
-                       help="Output path (default: output/temporal_median.mp4)")
-    p_med.add_argument("--window", type=int, default=7,
-                       help="Median kernel size in frames, odd (default: 7)")
-    p_med.add_argument("--seed", type=int, default=None,
-                       help="Random seed for reproducibility")
-
     # --- axis-swap ---
     p_swap = sub.add_parser("axis-swap",
                             help="Axis swap — view volume from the side")
@@ -480,6 +488,29 @@ def _cli():
                          help="Scramble strength 0-1 (default: 1.0)")
     p_pscr.add_argument("--seed", type=int, default=None)
 
+    # --- datamosh ---
+    p_dm = sub.add_parser("datamosh",
+                           help="Simulated datamosh — freeze reference, warp with flow")
+    p_dm.add_argument("src", type=Path, help="Source video file")
+    p_dm.add_argument("-o", "--output", type=Path, default=None)
+    p_dm.add_argument("--refresh-interval", type=int, default=30,
+                       help="Frames between reference refresh (default: 30)")
+    p_dm.add_argument("--blend", type=float, default=0.0,
+                       help="Blend real pixels in 0-1 (default: 0.0)")
+    p_dm.add_argument("--seed", type=int, default=None)
+
+    # --- frame-quantize ---
+    p_fq = sub.add_parser("frame-quantize",
+                           help="Reduce to K representative frames")
+    p_fq.add_argument("src", type=Path, help="Source video file")
+    p_fq.add_argument("-o", "--output", type=Path, default=None)
+    p_fq.add_argument("--n-levels", type=int, default=8,
+                       help="Number of representative frames (default: 8)")
+    p_fq.add_argument("--mode", type=str, default="luminance",
+                       choices=["luminance", "color"],
+                       help="Clustering metric (default: luminance)")
+    p_fq.add_argument("--seed", type=int, default=None)
+
     args = parser.parse_args()
     cfg = Config()
     cfg.ensure_dirs()
@@ -526,11 +557,6 @@ def _cli():
             src=args.src, output=args.output,
             order=args.order, seed=args.seed, cfg=cfg,
         )
-    elif args.command == "temporal-median":
-        time_lab_temporal_median(
-            src=args.src, output=args.output,
-            window=args.window, seed=args.seed, cfg=cfg,
-        )
     elif args.command == "axis-swap":
         time_lab_axis_swap(
             src=args.src, output=args.output,
@@ -569,6 +595,18 @@ def _cli():
         time_lab_phase_scramble(
             src=args.src, output=args.output,
             amount=args.amount, seed=args.seed, cfg=cfg,
+        )
+    elif args.command == "datamosh":
+        time_lab_datamosh(
+            src=args.src, output=args.output,
+            refresh_interval=args.refresh_interval, blend=args.blend,
+            seed=args.seed, cfg=cfg,
+        )
+    elif args.command == "frame-quantize":
+        time_lab_frame_quantize(
+            src=args.src, output=args.output,
+            n_levels=args.n_levels, mode=args.mode,
+            seed=args.seed, cfg=cfg,
         )
 
 

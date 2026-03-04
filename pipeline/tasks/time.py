@@ -1494,76 +1494,6 @@ def temporal_gradient(
         return _write_frames(output, dst, info, c, "temporal_gradient")
 
 
-# ---------------------------------------------------------------------------
-# 14c. Temporal Median
-# ---------------------------------------------------------------------------
-
-def _process_temporal_median(
-    frames: list[np.ndarray],
-    fps: float,
-    *,
-    window: int = 7,
-    seed: Optional[int] = None,
-) -> list[np.ndarray]:
-    """Rolling median along time axis — removes transient motion.
-
-    window: number of frames in the median kernel (must be odd).
-    Small window (3–5): softens motion while keeping structure.
-    Large window (15–31): ghost-like smear, only persistent features remain.
-    """
-    n = len(frames)
-    if n < 3:
-        return list(frames)
-
-    # Ensure odd window
-    window = max(3, window | 1)  # force odd
-    window = min(window, n)      # can't exceed frame count
-
-    vol = np.stack(frames, axis=0)  # (T, H, W, 3) uint8
-
-    # Rolling median along time axis using numpy — no scipy dependency.
-    # Pad the volume temporally with edge values, then slide a window.
-    half = window // 2
-    padded = np.pad(vol, ((half, half), (0, 0), (0, 0), (0, 0)), mode="edge")
-    # Sliding window view: (T, window, H, W, 3) — zero-copy
-    shape = (n, window) + vol.shape[1:]
-    strides = (padded.strides[0],) + padded.strides
-    windowed = np.lib.stride_tricks.as_strided(padded, shape=shape, strides=strides)
-    # Median along the window axis (axis=1)
-    filtered = np.median(windowed, axis=1).astype(np.uint8)
-
-    return [filtered[i] for i in range(n)]
-
-
-@task(name="temporal-median", tags=["ram-heavy"])
-def temporal_median(
-    src: Path,
-    dst: Path,
-    *,
-    window: int = 7,
-    seed: Optional[int] = None,
-    cfg: Optional[Config] = None,
-) -> Path:
-    """Temporal median — rolling median along time axis.
-
-    Removes transient motion; only features persisting for window/2 frames survive.
-    window: median kernel size in frames (odd, default 7).
-    """
-    c = cfg or Config()
-    info = probe(src, c)
-
-    with _load_frames(src, c) as frames:
-        n = len(frames)
-        print(f"temporal_median: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
-        print(f"  window={window}")
-
-        t0 = _time.monotonic()
-        output = _process_temporal_median(frames, info.fps, window=window, seed=seed)
-        elapsed = _time.monotonic() - t0
-        print(f"  processed in {elapsed:.1f}s")
-
-        return _write_frames(output, dst, info, c, "temporal_median")
-
 
 # ---------------------------------------------------------------------------
 # 14d. Axis Swap
@@ -2384,6 +2314,206 @@ def scan_refresh(
 
 
 # ---------------------------------------------------------------------------
+# Datamosh (simulated)
+# ---------------------------------------------------------------------------
+
+def _process_datamosh(
+    frames,
+    fps: float,
+    *,
+    refresh_interval: int = 30,
+    blend: float = 0.0,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Simulated datamosh — freeze reference frame, warp with optical flow.
+
+    Freezes a reference frame and applies motion vectors from subsequent
+    frames to warp it, creating the classic datamosh drift effect.
+    Periodically refreshes the reference to prevent total degradation.
+    blend > 0 leaks new pixel data into the warped reference.
+    """
+    import cv2
+
+    n = len(frames)
+    if n < 2:
+        return list(frames)
+
+    h, w = frames[0].shape[:2]
+    grid_x, grid_y = np.meshgrid(np.arange(w, dtype=np.float32),
+                                  np.arange(h, dtype=np.float32))
+    refresh_interval = max(2, refresh_interval)
+    blend = np.clip(blend, 0.0, 1.0)
+
+    ref = frames[0].copy().astype(np.float32)
+    prev_gray = cv2.cvtColor(frames[0], cv2.COLOR_RGB2GRAY)
+    output = [frames[0].copy()]
+
+    for i in range(1, n):
+        gray = cv2.cvtColor(frames[i], cv2.COLOR_RGB2GRAY)
+
+        # Refresh reference periodically
+        if i % refresh_interval == 0:
+            ref = frames[i].copy().astype(np.float32)
+            prev_gray = gray
+            output.append(frames[i].copy())
+            continue
+
+        # Compute flow between previous and current actual frame
+        flow = cv2.calcOpticalFlowFarneback(
+            prev_gray, gray, None,
+            pyr_scale=0.5, levels=3, winsize=15,
+            iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
+        )
+
+        # Apply flow to warp the frozen reference
+        map_x = grid_x + flow[:, :, 0]
+        map_y = grid_y + flow[:, :, 1]
+        warped = cv2.remap(
+            ref.astype(np.uint8), map_x, map_y,
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REFLECT,
+        ).astype(np.float32)
+
+        # Optionally blend in real pixel data
+        if blend > 0:
+            warped = (1.0 - blend) * warped + blend * frames[i].astype(np.float32)
+
+        ref = warped
+        prev_gray = gray
+        output.append(np.clip(warped, 0, 255).astype(np.uint8))
+
+    return output
+
+
+@task(name="datamosh", tags=["ram-heavy"])
+def datamosh(
+    src: Path,
+    dst: Path,
+    *,
+    refresh_interval: int = 30,
+    blend: float = 0.0,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Simulated datamosh — freeze reference, warp with optical flow."""
+    c = cfg or Config()
+    info = probe(src, c)
+
+    print(f"datamosh: {info.duration:.1f}s @ {info.fps}fps, "
+          f"{info.width}x{info.height}")
+    print(f"  refresh_interval={refresh_interval}, blend={blend}")
+
+    with _load_frames(src, c) as frames:
+        output = _process_datamosh(
+            frames, info.fps, refresh_interval=refresh_interval,
+            blend=blend, seed=seed,
+        )
+        return _write_frames(output, dst, info, c, "datamosh")
+
+
+# ---------------------------------------------------------------------------
+# Frame quantize
+# ---------------------------------------------------------------------------
+
+def _process_frame_quantize(
+    frames,
+    fps: float,
+    *,
+    n_levels: int = 8,
+    mode: str = "luminance",
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Frame quantize — reduce to K representative frames via clustering.
+
+    Computes a per-frame feature (mean luminance or mean RGB), clusters
+    into n_levels groups, and replaces each frame with the centroid frame
+    of its cluster. Creates a flip-book stutter effect.
+    """
+    n = len(frames)
+    if n < 2:
+        return list(frames)
+
+    n_levels = max(2, min(n_levels, n))
+
+    # Compute per-frame features
+    if mode == "color":
+        features = np.array([f.mean(axis=(0, 1)) for f in frames])  # (N, 3)
+    else:  # luminance
+        features = np.array([
+            (0.2126 * f[:, :, 0].mean() + 0.7152 * f[:, :, 1].mean() +
+             0.0722 * f[:, :, 2].mean())
+            for f in frames
+        ]).reshape(-1, 1)  # (N, 1)
+
+    # Simple k-means (avoid sklearn dependency)
+    # Initialize centroids via uniform spacing
+    centroid_idx = np.linspace(0, n - 1, n_levels).astype(int)
+    centroids = features[centroid_idx].copy()
+
+    for _ in range(20):  # max iterations
+        # Assign each frame to nearest centroid
+        dists = np.linalg.norm(
+            features[:, None, :] - centroids[None, :, :], axis=2,
+        )  # (N, K)
+        labels = np.argmin(dists, axis=1)
+
+        # Update centroids
+        new_centroids = np.empty_like(centroids)
+        for k in range(n_levels):
+            mask = labels == k
+            if mask.any():
+                new_centroids[k] = features[mask].mean(axis=0)
+            else:
+                new_centroids[k] = centroids[k]
+
+        if np.allclose(centroids, new_centroids, atol=1e-6):
+            break
+        centroids = new_centroids
+
+    # For each cluster, find the frame nearest to the centroid
+    rep_frames = {}
+    for k in range(n_levels):
+        mask = np.where(labels == k)[0]
+        if len(mask) == 0:
+            rep_frames[k] = frames[centroid_idx[k]]
+            continue
+        cluster_features = features[mask]
+        dists_to_center = np.linalg.norm(
+            cluster_features - centroids[k], axis=1,
+        )
+        rep_frames[k] = frames[mask[np.argmin(dists_to_center)]]
+
+    # Map each frame to its representative
+    return [rep_frames[labels[i]].copy() for i in range(n)]
+
+
+@task(name="frame-quantize", tags=["ram-heavy"])
+def frame_quantize(
+    src: Path,
+    dst: Path,
+    *,
+    n_levels: int = 8,
+    mode: str = "luminance",
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Frame quantize — reduce to K representative frames."""
+    c = cfg or Config()
+    info = probe(src, c)
+
+    print(f"frame_quantize: {info.duration:.1f}s @ {info.fps}fps, "
+          f"{info.width}x{info.height}")
+    print(f"  n_levels={n_levels}, mode={mode}")
+
+    with _load_frames(src, c) as frames:
+        output = _process_frame_quantize(
+            frames, info.fps, n_levels=n_levels, mode=mode, seed=seed,
+        )
+        return _write_frames(output, dst, info, c, "frame_quantize")
+
+
+
+# ---------------------------------------------------------------------------
 # Fused time effect chain
 # ---------------------------------------------------------------------------
 
@@ -2476,7 +2606,6 @@ register_process("quad_loop", _process_quad_loop, quad_loop)
 register_process("scan_refresh", _process_scan_refresh, scan_refresh)
 register_process("temporal_fft", _process_temporal_fft, temporal_fft)
 register_process("temporal_gradient", _process_temporal_gradient, temporal_gradient)
-register_process("temporal_median", _process_temporal_median, temporal_median)
 register_process("axis_swap", _process_axis_swap, axis_swap)
 register_process("temporal_morph", _process_temporal_morph, temporal_morph)
 register_process("depth_slice", _process_depth_slice, depth_slice)
@@ -2484,3 +2613,5 @@ register_process("temporal_equalize", _process_temporal_equalize, temporal_equal
 register_process("temporal_displace", _process_temporal_displace, temporal_displace)
 register_process("spectral_remix", _process_spectral_remix, spectral_remix)
 register_process("phase_scramble", _process_phase_scramble, phase_scramble)
+register_process("datamosh", _process_datamosh, datamosh)
+register_process("frame_quantize", _process_frame_quantize, frame_quantize)
