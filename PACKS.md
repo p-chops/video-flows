@@ -18,11 +18,61 @@ packs/
     └── stacks.yaml
 ```
 
-When the pipeline runs, it auto-discovers every `packs/*/stacks.yaml` and loads them all into the shared pool. Every archetype (deep_time, polyrhythm, temporal_sandwich, etc.) randomly picks from this pool, so adding a new pack automatically enriches all generated output.
+When the pipeline runs, it auto-discovers every `packs/*/stacks.yaml` and loads them all into the shared pool. Every archetype randomly picks from this pool, so adding a new pack automatically enriches all generated output.
 
-## Creating a pack
+## Quick start — create a pack from shaders
 
-### 1. Make the directory structure
+Have a folder of ISF `.fs` shaders? Two commands to go from shaders to rendered output:
+
+```bash
+# 1. Create the pack (validates, filters out broken shaders, generates stacks.yaml)
+python scripts/create_pack.py my_effects ~/Downloads/cool_shaders/
+
+# 2. Render a show reel with it
+python -m pipeline.flows.show_reel run -n 8 --pack my_effects --seed 42
+```
+
+`create_pack.py` does everything:
+- Copies `.fs` files into `packs/my_effects/shaders/`
+- Parses each shader's ISF header and compile-tests the GLSL
+- Removes any shaders that fail validation (with a report)
+- Classifies shaders as **processors** (have `inputImage`) or **generators** (no video input)
+- Generates `stacks.yaml` with randomized shader combinations and parameter specs
+
+Options:
+
+```bash
+# Control the number of stacks (default: based on shader count)
+python scripts/create_pack.py my_effects ~/shaders/ --n-stacks 25
+
+# Different random seed for different stack combinations
+python scripts/create_pack.py my_effects ~/shaders/ --seed 99
+
+# Shaders already in place? Just point at them
+python scripts/create_pack.py my_effects packs/my_effects/shaders/
+```
+
+To regenerate stacks for an existing pack (e.g., after adding/removing shaders):
+
+```bash
+python scripts/generate_stacks.py packs/my_effects/shaders/ -o packs/my_effects/stacks.yaml
+```
+
+### How procedural generation works
+
+The generator reads each shader's ISF metadata (parameter names, types, ranges) and builds randomized stacks:
+
+1. **Phase 1 (coverage)** — ensures every processor shader appears in at least one stack
+2. **Phase 2 (variety)** — fills remaining slots with varied combinations, preferring least-used shaders
+3. **Parameter specs** — auto-generated from ISF `MIN`/`MAX`/`DEFAULT` with intensity-related params (brightness, opacity, etc.) pinned at defaults to prevent crushed output
+
+Stack sizes are weighted: mostly 2–3 shader chains, with occasional singles and 4-shader chains. The default stack count uses `2.5 × √(n_processors)` — enough variety to avoid repeats in a typical show reel.
+
+## Creating a pack manually
+
+For full creative control, you can write stacks by hand instead of generating them.
+
+### 1. Set up the directory
 
 ```bash
 mkdir -p packs/my_pack/shaders
@@ -112,7 +162,7 @@ The pipeline's ISF translator handles the conversion from ISF builtins to standa
 
 A stack is a curated combination of shaders from your pack, applied in order. This is where the visual identity lives — stacks define *how* your shaders work together.
 
-Create `packs/my_pack/stacks.yaml`:
+You can start with a procedurally generated `stacks.yaml` and then hand-edit it, or write from scratch:
 
 ```yaml
 stacks:
@@ -194,13 +244,10 @@ All flow CLIs accept `--pack` to restrict which packs are used. Repeatable for m
 # Use all installed packs (default)
 python -m pipeline.flows.show_reel run -n 8 --seed 42
 
-# Only use the ulp pack
-python -m pipeline.flows.show_reel run -n 8 --seed 42 --pack ulp
-
 # Only use starter
 python -m pipeline.flows.show_reel run -n 8 --seed 42 --pack starter
 
-# Use both starter and my_pack (exclude ulp)
+# Use both starter and my_pack
 python -m pipeline.flows.show_reel run -n 8 --seed 42 --pack starter --pack my_pack
 ```
 
@@ -236,7 +283,7 @@ packs/*
 
 ## Tips
 
-- **Start with one stack.** You can always add more. A single well-tuned stack is more useful than ten untested ones.
+- **Generate first, curate later.** Run `create_pack.py` to get a working pack immediately. Then hand-edit `stacks.yaml` to fine-tune your favorites — delete stacks you don't like, add custom ones, adjust parameter ranges.
 - **Test stacks with `plan` first.** `python -m pipeline.flows.show_reel plan -n 5 --seed 42 --pack my_pack` shows you exactly what recipes will be generated without rendering anything.
 - **Shader order matters.** A posterize before an edge detector looks very different from the reverse. Experiment with ordering.
 - **Stacks are pure shader chains.** Time effects (echo, drift, scrub, etc.) come from archetypes, not from stacks. Your stacks just define the visual processing — the pipeline wraps them in temporal structure automatically.

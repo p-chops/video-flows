@@ -45,8 +45,10 @@ packs/*
 # Docs (local only)
 docs/
 
-# Scripts (local only)
-scripts/
+# Scripts — track user-facing tools, ignore personal/dev scripts
+scripts/*
+!scripts/create_pack.py
+!scripts/generate_stacks.py
 
 # Backups
 backup/

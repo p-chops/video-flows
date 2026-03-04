@@ -1,4 +1,4 @@
-# ULP Video Pipeline
+# Video Flows
 
 Automated video processing pipeline for dense, textural, otherworldly visuals. Takes source footage or generates visuals from scratch via GLSL shaders, then processes through shader stacks, temporal effects, codec crush, compositing, and transitions — all orchestrated with [Prefect](https://www.prefect.io/).
 
@@ -13,6 +13,17 @@ python -m pipeline.flows.show_reel run -n 8 --seed 42
 
 Output lands in `output/`. That's it — the included **starter pack** has everything needed to produce output on first run.
 
+### Bring your own shaders
+
+Have ISF shaders? Create a pack and start rendering in two commands:
+
+```bash
+python scripts/create_pack.py my_effects ~/Downloads/cool_shaders/
+python -m pipeline.flows.show_reel run -n 8 --pack my_effects --seed 42
+```
+
+`create_pack.py` validates your shaders, removes any that don't compile, and auto-generates `stacks.yaml` with randomized shader combinations. See [PACKS.md](PACKS.md) for details.
+
 ## Shader packs
 
 Shader packs are self-contained bundles of ISF shaders and curated combinations ("stacks") that live under `packs/`. The pipeline auto-discovers all installed packs at runtime.
@@ -22,7 +33,7 @@ packs/
 ├── starter/          ← included — 14 shaders, 12 stacks
 │   ├── shaders/
 │   └── stacks.yaml
-└── my_pack/          ← add your own
+└── my_pack/          ← add your own (create_pack.py generates this)
     ├── shaders/
     └── stacks.yaml
 ```
@@ -40,7 +51,7 @@ python -m pipeline.flows.show_reel run -n 8 --pack starter --pack my_effects --s
 python -m pipeline.flows.show_reel run -n 8 --seed 42
 ```
 
-Creating a new pack is straightforward — write ISF v2 shaders, define stacks in YAML, drop them in `packs/`. See [PACKS.md](PACKS.md) for the full guide.
+See [PACKS.md](PACKS.md) for the full guide on creating and curating packs.
 
 ## Show reel
 
@@ -89,23 +100,17 @@ python -m pipeline.flows.show_reel render work/reel_777_manifest.json
 
 ### Recipe system
 
-Processing is described by **recipes** — declarative structures that specify sources, steps, lane compositing, and post-processing. The procedural generator (`random_recipe()`) chooses from 11 structural archetypes:
+Processing is described by **recipes** — declarative structures that specify sources, steps, lane compositing, and post-processing. The procedural generator (`random_recipe()`) chooses from 5 structural archetypes along a spatial–temporal axis:
 
-| Archetype | Structure |
-|-----------|-----------|
-| `deep_time` | 5-8 stacked time effects, pure temporal destruction |
-| `temporal_sandwich` | Alternating time effect / shader stack pairs |
-| `escalation` | Progressive parameter increase across steps or lanes |
-| `polyrhythm` | 2-4 lanes at different temporal rates, blended |
-| `palimpsest` | Same source, two contrasting treatments, masked composite |
-| `hybrid` | Footage + generator lane, masked composite |
-| `grab_bag` | Independent random step draws |
-| `stutter` | Rapid-fire short segments, hard cuts |
-| `echo_chamber` | Stacked echo effects at increasing delays |
-| `warp_focus` | Generator with heavy warp chain |
-| `edge_poster` | Posterize + edge glow pairing |
+| Archetype | Weight | Structure |
+|-----------|--------|-----------|
+| `deep_space` | 3.0 | Pure shader stack — hand-curated boutique stacks, no time effects |
+| `deep_time` | 2.0 | 5–8 stacked time effects, pure temporal destruction |
+| `spatial_cascade` | 1.5 | Shaders → time effects (spatial world animated temporally) |
+| `temporal_cascade` | 1.5 | Time effects → shaders (motion texture given visual identity) |
+| `codec_crush` | 0.5 | Multi-codec crush cascade (mpeg2 → mpeg4 → x264) |
 
-Complexity (0.0-1.0) scales parameters within the chosen archetype.
+Complexity (0.0–1.0) scales parameters within the chosen archetype.
 
 ### Quality gate
 
