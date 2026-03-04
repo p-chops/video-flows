@@ -2097,7 +2097,7 @@ def _build_deep_time(
     target_dur: Optional[float],
     seed: Optional[int],
 ) -> BrainWipeRecipe:
-    """5–8 stacked time effects, 1 shader, normalize. Temporal destruction."""
+    """5–8 stacked time effects, pure temporal. No shaders."""
     actual_segments = _resolve_segments(rng, complexity, n_segments)
     wants_transition = use_transitions if use_transitions is not None else (
         rng.random() < 0.2 + 0.6 * complexity
@@ -2109,6 +2109,7 @@ def _build_deep_time(
     steps: list[Step] = []
     for _ in range(n_time):
         steps.append(_random_time_step(rng, complexity))
+    steps.append(NormalizeStep())
 
     source = _random_source(rng, src, use_generators, complexity)
     lane = _make_lane(rng, source=source, steps=steps, n_segments=actual_segments,
@@ -2152,6 +2153,148 @@ def _build_temporal_sandwich(
     wants_post = rng.random() < 0.1 + 0.4 * complexity
     return _assemble_recipe([lane], rng=rng, complexity=complexity, src=src,
                             seed=seed, wants_post=wants_post)
+
+
+def _build_spatial_cascade(
+    rng: _random_mod.Random,
+    complexity: float,
+    src: Optional[Path],
+    *,
+    n_lanes: Optional[int],
+    n_steps: Optional[int],
+    n_segments: Optional[int],
+    use_transitions: Optional[bool],
+    use_generators: Optional[bool],
+    target_dur: Optional[float],
+    seed: Optional[int],
+) -> BrainWipeRecipe:
+    """S→T: Shader stacks build a visual world, time effects animate it."""
+    actual_segments = _resolve_segments(rng, complexity, n_segments)
+    wants_transition = use_transitions if use_transitions is not None else (
+        rng.random() < 0.2 + 0.6 * complexity
+    )
+    seg_target = _seg_dur_target(target_dur, actual_segments, wants_transition)
+
+    source = _random_source(rng, src, use_generators, complexity)
+    is_footage = isinstance(source, FootageSource)
+
+    steps: list[Step] = []
+    # 1–2 boutique shader stacks (footage: always 1)
+    steps.append(_shader_step(rng, complexity))
+    if not is_footage and complexity > 0.5 and rng.random() < 0.5:
+        steps.append(_shader_step(rng, complexity))
+    steps.append(NormalizeStep())
+
+    # 2–4 time effects; footage gets fewer to preserve source character
+    n_time = max(2, int(2 + complexity * 2))
+    if is_footage:
+        n_time = max(1, n_time - 1)
+    for _ in range(n_time):
+        steps.append(_random_time_step(rng, complexity))
+
+    lane = _make_lane(rng, source=source, steps=steps, n_segments=actual_segments,
+                      wants_transition=wants_transition, seg_target=seg_target)
+
+    return _assemble_recipe([lane], rng=rng, complexity=complexity, src=src,
+                            seed=seed, wants_post=False)
+
+
+def _eligible_spatial_cascade(src, n_lanes, use_generators):
+    return n_lanes is None or n_lanes == 1
+
+
+def _build_temporal_cascade(
+    rng: _random_mod.Random,
+    complexity: float,
+    src: Optional[Path],
+    *,
+    n_lanes: Optional[int],
+    n_steps: Optional[int],
+    n_segments: Optional[int],
+    use_transitions: Optional[bool],
+    use_generators: Optional[bool],
+    target_dur: Optional[float],
+    seed: Optional[int],
+) -> BrainWipeRecipe:
+    """T→S: Time effects create motion texture, shaders give it visual identity."""
+    actual_segments = _resolve_segments(rng, complexity, n_segments)
+    wants_transition = use_transitions if use_transitions is not None else (
+        rng.random() < 0.2 + 0.6 * complexity
+    )
+    seg_target = _seg_dur_target(target_dur, actual_segments, wants_transition)
+
+    source = _random_source(rng, src, use_generators, complexity)
+    is_footage = isinstance(source, FootageSource)
+
+    steps: list[Step] = []
+    # 2–4 time effects; footage gets fewer to preserve source character
+    n_time = max(2, int(2 + complexity * 2))
+    if is_footage:
+        n_time = max(1, n_time - 1)
+    for _ in range(n_time):
+        steps.append(_random_time_step(rng, complexity))
+
+    # 1 boutique shader stack + normalize
+    steps.append(_shader_step(rng, complexity))
+    steps.append(NormalizeStep())
+
+    lane = _make_lane(rng, source=source, steps=steps, n_segments=actual_segments,
+                      wants_transition=wants_transition, seg_target=seg_target)
+
+    return _assemble_recipe([lane], rng=rng, complexity=complexity, src=src,
+                            seed=seed, wants_post=False)
+
+
+def _eligible_temporal_cascade(src, n_lanes, use_generators):
+    return n_lanes is None or n_lanes == 1
+
+
+def _build_codec_crush(
+    rng: _random_mod.Random,
+    complexity: float,
+    src: Optional[Path],
+    *,
+    n_lanes: Optional[int],
+    n_steps: Optional[int],
+    n_segments: Optional[int],
+    use_transitions: Optional[bool],
+    use_generators: Optional[bool],
+    target_dur: Optional[float],
+    seed: Optional[int],
+) -> BrainWipeRecipe:
+    """Single codec crush → shader stack → normalize.
+
+    Unlike crush_sandwich (multiple alternating crush/shader pairs), this
+    uses exactly one crush pass to add texture without flattening motion.
+    Codec and crush intensity are randomised per complexity.
+    """
+    actual_segments = _resolve_segments(rng, complexity, n_segments)
+    wants_transition = use_transitions if use_transitions is not None else (
+        rng.random() < 0.2 + 0.6 * complexity
+    )
+    seg_target = _seg_dur_target(target_dur, actual_segments, wants_transition)
+
+    # Single crush pass — x264 at high QP is the sweet spot
+    crush_val = rng.uniform(0.7, 1.0)
+    codec = rng.choice(["libx264", "libx264", "mpeg4"])  # favour x264
+    downscale = rng.choice([1.0, 1.0, 2.0]) if complexity > 0.5 else 1.0
+
+    steps: list[Step] = [
+        CrushStep(crush=crush_val, codec=codec, downscale=downscale),
+        _shader_step(rng, complexity),
+        NormalizeStep(),
+    ]
+
+    source = _random_source(rng, src, use_generators, complexity)
+    lane = _make_lane(rng, source=source, steps=steps, n_segments=actual_segments,
+                      wants_transition=wants_transition, seg_target=seg_target)
+
+    return _assemble_recipe([lane], rng=rng, complexity=complexity, src=src,
+                            seed=seed, wants_post=False)
+
+
+def _eligible_codec_crush(src, n_lanes, use_generators):
+    return n_lanes is None or n_lanes == 1
 
 
 def _build_escalation(
@@ -2632,7 +2775,7 @@ def _eligible_warp_focus(src, n_lanes, use_generators):
 
 
 
-# ─── Boutique archetype ────────────────────────────────────────────────────
+# ─── Deep space archetype (pure shader stacks) ───────────────────────────
 
 # Time effect type name → Step dataclass mapping (for YAML config resolution).
 _TIME_EFFECT_TYPES: dict[str, type] = {
@@ -2753,7 +2896,7 @@ def _make_time_step(rng: _random_mod.Random, spec: dict) -> Step:
 # Load stacks from YAML at import time.
 _BOUTIQUE_STACKS_RAW = load_boutique_stacks()
 
-# When set, _shader_step() and _build_boutique() use this instead of
+# When set, _shader_step() and _build_deep_space() use this instead of
 # _BOUTIQUE_STACKS_RAW.  random_recipe() sets it to a pack-filtered subset
 # for the duration of a single recipe build, then resets to None.
 _active_stacks: Optional[list] = None
@@ -2787,7 +2930,7 @@ def _resolve_shader_params(
     return resolved
 
 
-def _build_boutique(
+def _build_deep_space(
     rng: _random_mod.Random,
     complexity: float,
     src: Optional[Path],
@@ -2800,7 +2943,7 @@ def _build_boutique(
     target_dur: Optional[float],
     seed: Optional[int],
 ) -> BrainWipeRecipe:
-    """Boutique collection: hand-designed shader stacks for distinctive textures.
+    """Pure shader stack — hand-curated boutique stacks, no time effects.
 
     Each stack is a curated shader combination with randomised per-shader
     parameters — designed for lively, abstract, visually rich output.
@@ -2843,24 +2986,33 @@ def _build_boutique(
     )
 
 
-def _eligible_boutique(src, n_lanes, use_generators):
+def _eligible_deep_space(src, n_lanes, use_generators):
     return n_lanes is None or n_lanes == 1
 
 
 # (builder, eligibility_fn, weight) — weight controls selection probability
+#
+# 4 core archetypes on a spatial ←→ temporal axis:
+#   deep_space (pure S) — spatial_cascade (S→T) — temporal_cascade (T→S) — deep_time (pure T)
+# Plus codec_crush as a low-weight texture variant.
+#
 _ARCHETYPES: dict[str, tuple] = {
-    # "crush_sandwich":    (_build_crush_sandwich, _eligible_crush_sandwich, 1.0),
+    "deep_space":        (_build_deep_space, _eligible_deep_space, 3.0),
     "deep_time":         (_build_deep_time, _eligible_deep_time, 2.0),
-    "temporal_sandwich": (_build_temporal_sandwich, _eligible_temporal_sandwich, 2.0),
+    "spatial_cascade":   (_build_spatial_cascade, _eligible_spatial_cascade, 1.5),
+    "temporal_cascade":  (_build_temporal_cascade, _eligible_temporal_cascade, 1.5),
+    "codec_crush":       (_build_codec_crush, _eligible_codec_crush, 0.5),
+    # --- disabled ---
+    # "crush_sandwich":    (_build_crush_sandwich, _eligible_crush_sandwich, 1.0),  # crush kills motion
+    # "temporal_sandwich": (_build_temporal_sandwich, _eligible_temporal_sandwich, 2.0),  # replaced by cascades
     # "escalation":        (_build_escalation, _eligible_escalation, 1.0),  # crush kills motion
-    "polyrhythm":        (_build_polyrhythm, _eligible_polyrhythm, 1.0),
-    "palimpsest":        (_build_palimpsest, _eligible_palimpsest, 1.0),
-    "hybrid":            (_build_hybrid, _eligible_hybrid, 1.0),
+    # "polyrhythm":        (_build_polyrhythm, _eligible_polyrhythm, 1.0),  # multi-lane complexity
+    # "palimpsest":        (_build_palimpsest, _eligible_palimpsest, 1.0),  # multi-lane complexity
+    # "hybrid":            (_build_hybrid, _eligible_hybrid, 1.0),  # multi-lane complexity
     # "grab_bag":          (_build_grab_bag, _eligible_grab_bag, 1.0),  # no structural identity
-    "stutter":           (_build_stutter, _eligible_stutter, 1.0),
+    # "stutter":           (_build_stutter, _eligible_stutter, 1.0),  # editorial trick
     # "echo_chamber":      (_build_echo_chamber, _eligible_echo_chamber, 1.0),  # subset of temporal_sandwich
     # "warp_focus":        (_build_warp_focus, _eligible_warp_focus, 1.0),  # boutique stacks cover warps
-    "boutique":          (_build_boutique, _eligible_boutique, 3.0),
 }
 
 
