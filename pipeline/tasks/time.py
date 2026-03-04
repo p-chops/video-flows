@@ -1612,6 +1612,273 @@ def _process_axis_swap(
     return [output[i] for i in range(T)]
 
 
+# ---------------------------------------------------------------------------
+# 19. Temporal Morph (morphological ops along time)
+# ---------------------------------------------------------------------------
+
+def _process_temporal_morph(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    operation: str = "dilate",
+    window: int = 5,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Morphological operations along the time axis.
+
+    dilate:  pixel stays bright if bright in ANY frame within window.
+    erode:   pixel stays bright only if bright in ALL frames within window.
+    open:    erode then dilate — removes bright transients.
+    close:   dilate then erode — fills dark transients.
+    """
+    n = len(frames)
+    if n < 3:
+        return list(frames)
+
+    vol = np.stack(frames, axis=0)  # (T, H, W, 3) uint8
+    T = vol.shape[0]
+    window = max(3, window | 1)  # force odd
+    window = min(window, T)
+    half = window // 2
+
+    def _sliding_op(data: np.ndarray, op) -> np.ndarray:
+        padded = np.pad(data, ((half, half), (0, 0), (0, 0), (0, 0)), mode="edge")
+        shape = (T, window) + data.shape[1:]
+        strides = (padded.strides[0],) + padded.strides
+        windowed = np.lib.stride_tricks.as_strided(padded, shape=shape, strides=strides)
+        return op(windowed, axis=1).astype(np.uint8)
+
+    if operation == "dilate":
+        result = _sliding_op(vol, np.max)
+    elif operation == "erode":
+        result = _sliding_op(vol, np.min)
+    elif operation == "open":
+        result = _sliding_op(_sliding_op(vol, np.min), np.max)
+    elif operation == "close":
+        result = _sliding_op(_sliding_op(vol, np.max), np.min)
+    else:
+        result = vol
+
+    return [result[i] for i in range(T)]
+
+
+# ---------------------------------------------------------------------------
+# 20. Depth Slice (angled scan through spacetime)
+# ---------------------------------------------------------------------------
+
+def _process_depth_slice(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    angle: float = 45.0,
+    axis: str = "horizontal",
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Sweep a plane through the (T,X,Y) volume at an arbitrary angle.
+
+    angle=0 → identity (pure spatial). angle=90 → axis_swap.
+    Intermediate angles blend time and space continuously.
+    """
+    n = len(frames)
+    if n < 2:
+        return list(frames)
+
+    vol = np.stack(frames, axis=0)  # (T, H, W, 3)
+    T, H, W = vol.shape[:3]
+    output = np.empty_like(vol)
+
+    rad = np.radians(np.clip(angle, 0.0, 90.0))
+    cos_a = np.cos(rad)
+    sin_a = np.sin(rad)
+
+    if axis == "horizontal":
+        x_norm = np.linspace(0, 1, W)  # (W,)
+        for t in range(T):
+            t_norm = t / max(T - 1, 1)
+            t_sample = t_norm * cos_a + x_norm * sin_a
+            t_idx = np.clip((t_sample * (T - 1)).astype(np.intp), 0, T - 1)
+            output[t] = vol[t_idx, :, np.arange(W)].transpose(1, 0, 2)
+    else:
+        y_norm = np.linspace(0, 1, H)  # (H,)
+        for t in range(T):
+            t_norm = t / max(T - 1, 1)
+            t_sample = t_norm * cos_a + y_norm * sin_a
+            t_idx = np.clip((t_sample * (T - 1)).astype(np.intp), 0, T - 1)
+            output[t] = vol[t_idx, np.arange(H), :]
+
+    return [output[i] for i in range(T)]
+
+
+# ---------------------------------------------------------------------------
+# 21. Temporal Equalize (per-pixel histogram equalization along time)
+# ---------------------------------------------------------------------------
+
+def _process_temporal_equalize(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    strength: float = 1.0,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Per-pixel histogram equalization along the time axis.
+
+    Each pixel is individually rank-normalized across its temporal history,
+    forcing every pixel to use its full dynamic range over time.
+    """
+    n = len(frames)
+    if n < 3:
+        return list(frames)
+
+    vol = np.stack(frames, axis=0).astype(np.float32)  # (T, H, W, 3)
+    T = vol.shape[0]
+
+    order = np.argsort(vol, axis=0)
+    ranks = np.empty_like(order)
+    np.put_along_axis(ranks, order, np.arange(T)[:, None, None, None], axis=0)
+
+    equalized = (ranks.astype(np.float32) / max(T - 1, 1)) * 255.0
+    result = vol * (1.0 - strength) + equalized * strength
+    result = np.clip(result, 0, 255).astype(np.uint8)
+    return [result[i] for i in range(T)]
+
+
+# ---------------------------------------------------------------------------
+# 22. Temporal Displace (self-referential time warp)
+# ---------------------------------------------------------------------------
+
+def _process_temporal_displace(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    amount: float = 0.5,
+    channel: str = "luma",
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """Use each pixel's brightness to index into the time axis.
+
+    Bright pixels show future frames, dark pixels show past frames.
+    amount controls how far in time the displacement can reach.
+    """
+    n = len(frames)
+    if n < 3:
+        return list(frames)
+
+    vol = np.stack(frames, axis=0).astype(np.float32)  # (T, H, W, 3)
+    T, H, W = vol.shape[:3]
+
+    ch_map = {"r": 0, "g": 1, "b": 2}
+    if channel in ch_map:
+        disp = vol[..., ch_map[channel]]
+    else:  # luma
+        disp = 0.2126 * vol[..., 0] + 0.7152 * vol[..., 1] + 0.0722 * vol[..., 2]
+    disp = disp / 255.0  # (T, H, W) in [0, 1]
+
+    offset = (disp - 0.5) * 2.0 * amount * T
+    t_base = np.arange(T)[:, None, None]
+    lookup = np.clip(t_base + offset, 0, T - 1).astype(np.intp)
+
+    y_idx = np.arange(H)[None, :, None]
+    x_idx = np.arange(W)[None, None, :]
+    result = vol[lookup, y_idx, x_idx, :]
+    return [np.clip(result[i], 0, 255).astype(np.uint8) for i in range(T)]
+
+
+# ---------------------------------------------------------------------------
+# 23. Spectral Remix (FFT frequency bin rearrangement)
+# ---------------------------------------------------------------------------
+
+def _process_spectral_remix(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    mode: str = "swap",
+    amount: float = 0.3,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """FFT along time, rearrange frequency bins, IFFT back.
+
+    swap:    exchange low and high halves.
+    reverse: reverse the frequency bin order.
+    rotate:  circular shift bins by quarter.
+    shuffle: random permutation of bins.
+
+    amount:  blend 0=original 1=fully rearranged. Low values (0.2-0.4)
+             give subtle temporal texture shift without flicker.
+    """
+    n = len(frames)
+    if n < 4:
+        return list(frames)
+
+    vol = np.stack(frames, axis=0).astype(np.float32)
+    spectrum = np.fft.rfft(vol, axis=0)
+    dc = spectrum[0:1].copy()
+
+    bins_orig = spectrum[1:]
+    nb = len(bins_orig)
+    if nb < 2:
+        return list(frames)
+
+    if mode == "swap":
+        mid = nb // 2
+        bins_new = np.concatenate([bins_orig[mid:], bins_orig[:mid]], axis=0)
+    elif mode == "reverse":
+        bins_new = bins_orig[::-1]
+    elif mode == "rotate":
+        shift = nb // 4 or 1
+        bins_new = np.concatenate([bins_orig[shift:], bins_orig[:shift]], axis=0)
+    elif mode == "shuffle":
+        rng = np.random.default_rng(seed)
+        perm = rng.permutation(nb)
+        bins_new = bins_orig[perm]
+    else:
+        bins_new = bins_orig
+
+    # Blend original and rearranged to control intensity
+    bins_blended = (1.0 - amount) * bins_orig + amount * bins_new
+
+    spectrum_new = np.concatenate([dc, bins_blended], axis=0)
+    filtered = np.fft.irfft(spectrum_new, n=n, axis=0)
+    return [np.clip(filtered[i], 0, 255).astype(np.uint8) for i in range(n)]
+
+
+# ---------------------------------------------------------------------------
+# 24. Phase Scramble (randomize phases, preserve magnitudes)
+# ---------------------------------------------------------------------------
+
+def _process_phase_scramble(
+    frames: list[np.ndarray],
+    fps: float,
+    *,
+    amount: float = 1.0,
+    seed: Optional[int] = None,
+) -> list[np.ndarray]:
+    """FFT along time, randomize phases while keeping magnitudes.
+
+    Preserves the power spectrum (same temporal texture/statistics)
+    but destroys temporal coherence.
+    amount=1.0: complete phase randomization.
+    amount=0.3: dreamlike desynchronization.
+    """
+    n = len(frames)
+    if n < 4:
+        return list(frames)
+
+    rng = np.random.default_rng(seed)
+    vol = np.stack(frames, axis=0).astype(np.float32)
+    spectrum = np.fft.rfft(vol, axis=0)
+
+    magnitudes = np.abs(spectrum)
+    phases = np.angle(spectrum)
+
+    random_phases = rng.uniform(-np.pi, np.pi,
+                                size=phases.shape).astype(np.float32)
+    new_phases = phases + amount * random_phases
+
+    spectrum_new = magnitudes * np.exp(1j * new_phases)
+    filtered = np.fft.irfft(spectrum_new, n=n, axis=0)
+    return [np.clip(filtered[i], 0, 255).astype(np.uint8) for i in range(n)]
+
+
 @task(name="axis-swap", tags=["ram-heavy"])
 def axis_swap(
     src: Path,
@@ -1641,6 +1908,146 @@ def axis_swap(
         print(f"  processed in {elapsed:.1f}s")
 
         return _write_frames(output, dst, info, c, "axis_swap")
+
+
+@task(name="temporal-morph", tags=["ram-heavy"])
+def temporal_morph(
+    src: Path,
+    dst: Path,
+    *,
+    operation: str = "dilate",
+    window: int = 5,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Morphological operations along the time axis."""
+    c = cfg or Config()
+    info = probe(src, c)
+    with _load_frames(src, c) as frames:
+        n = len(frames)
+        print(f"temporal_morph: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  operation={operation}, window={window}")
+        t0 = _time.monotonic()
+        output = _process_temporal_morph(frames, info.fps, operation=operation,
+                                         window=window, seed=seed)
+        print(f"  processed in {_time.monotonic() - t0:.1f}s")
+        return _write_frames(output, dst, info, c, "temporal_morph")
+
+
+@task(name="depth-slice", tags=["ram-heavy"])
+def depth_slice(
+    src: Path,
+    dst: Path,
+    *,
+    angle: float = 45.0,
+    axis: str = "horizontal",
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Angled scan plane through spacetime volume."""
+    c = cfg or Config()
+    info = probe(src, c)
+    with _load_frames(src, c) as frames:
+        n = len(frames)
+        print(f"depth_slice: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  angle={angle}, axis={axis}")
+        t0 = _time.monotonic()
+        output = _process_depth_slice(frames, info.fps, angle=angle,
+                                       axis=axis, seed=seed)
+        print(f"  processed in {_time.monotonic() - t0:.1f}s")
+        return _write_frames(output, dst, info, c, "depth_slice")
+
+
+@task(name="temporal-equalize", tags=["ram-heavy"])
+def temporal_equalize(
+    src: Path,
+    dst: Path,
+    *,
+    strength: float = 1.0,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Per-pixel histogram equalization along time axis."""
+    c = cfg or Config()
+    info = probe(src, c)
+    with _load_frames(src, c) as frames:
+        n = len(frames)
+        print(f"temporal_equalize: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  strength={strength}")
+        t0 = _time.monotonic()
+        output = _process_temporal_equalize(frames, info.fps, strength=strength,
+                                             seed=seed)
+        print(f"  processed in {_time.monotonic() - t0:.1f}s")
+        return _write_frames(output, dst, info, c, "temporal_equalize")
+
+
+@task(name="temporal-displace", tags=["ram-heavy"])
+def temporal_displace(
+    src: Path,
+    dst: Path,
+    *,
+    amount: float = 0.5,
+    channel: str = "luma",
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Self-referential time warp — brightness indexes into time."""
+    c = cfg or Config()
+    info = probe(src, c)
+    with _load_frames(src, c) as frames:
+        n = len(frames)
+        print(f"temporal_displace: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  amount={amount}, channel={channel}")
+        t0 = _time.monotonic()
+        output = _process_temporal_displace(frames, info.fps, amount=amount,
+                                             channel=channel, seed=seed)
+        print(f"  processed in {_time.monotonic() - t0:.1f}s")
+        return _write_frames(output, dst, info, c, "temporal_displace")
+
+
+@task(name="spectral-remix", tags=["ram-heavy"])
+def spectral_remix(
+    src: Path,
+    dst: Path,
+    *,
+    mode: str = "swap",
+    amount: float = 0.3,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """FFT frequency bin rearrangement along time axis."""
+    c = cfg or Config()
+    info = probe(src, c)
+    with _load_frames(src, c) as frames:
+        n = len(frames)
+        print(f"spectral_remix: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  mode={mode}, amount={amount}")
+        t0 = _time.monotonic()
+        output = _process_spectral_remix(frames, info.fps, mode=mode, amount=amount, seed=seed)
+        print(f"  processed in {_time.monotonic() - t0:.1f}s")
+        return _write_frames(output, dst, info, c, "spectral_remix")
+
+
+@task(name="phase-scramble", tags=["ram-heavy"])
+def phase_scramble(
+    src: Path,
+    dst: Path,
+    *,
+    amount: float = 1.0,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Randomize temporal phases while preserving frequency magnitudes."""
+    c = cfg or Config()
+    info = probe(src, c)
+    with _load_frames(src, c) as frames:
+        n = len(frames)
+        print(f"phase_scramble: {n} frames, {info.duration:.1f}s @ {info.fps}fps")
+        print(f"  amount={amount}")
+        t0 = _time.monotonic()
+        output = _process_phase_scramble(frames, info.fps, amount=amount, seed=seed)
+        print(f"  processed in {_time.monotonic() - t0:.1f}s")
+        return _write_frames(output, dst, info, c, "phase_scramble")
 
 
 # ---------------------------------------------------------------------------
@@ -1994,6 +2401,8 @@ def _apply_time_effect(
         FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
         ScanRefreshStep, TemporalFFTStep,
         TemporalGradientStep, TemporalMedianStep, AxisSwapStep,
+        TemporalMorphStep, DepthSliceStep, TemporalEqualizeStep,
+        TemporalDisplaceStep, SpectralRemixStep, PhaseScrambleStep,
     )
     match step:
         case ScrubStep(smoothness=smoothness, intensity=intensity):
@@ -2041,6 +2450,18 @@ def _apply_time_effect(
             return _process_temporal_median(frames, fps, window=window, seed=seed)
         case AxisSwapStep(axis=axis):
             return _process_axis_swap(frames, fps, axis=axis, seed=seed)
+        case TemporalMorphStep(operation=operation, window=window):
+            return _process_temporal_morph(frames, fps, operation=operation, window=window, seed=seed)
+        case DepthSliceStep(angle=angle, axis=axis):
+            return _process_depth_slice(frames, fps, angle=angle, axis=axis, seed=seed)
+        case TemporalEqualizeStep(strength=strength):
+            return _process_temporal_equalize(frames, fps, strength=strength, seed=seed)
+        case TemporalDisplaceStep(amount=amount, channel=channel):
+            return _process_temporal_displace(frames, fps, amount=amount, channel=channel, seed=seed)
+        case SpectralRemixStep(mode=mode, amount=amount):
+            return _process_spectral_remix(frames, fps, mode=mode, amount=amount, seed=seed)
+        case PhaseScrambleStep(amount=amount):
+            return _process_phase_scramble(frames, fps, amount=amount, seed=seed)
         case _:
             raise ValueError(f"Not a time effect step: {type(step).__name__}")
 

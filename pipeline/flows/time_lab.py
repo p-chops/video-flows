@@ -35,6 +35,8 @@ from ..config import Config
 from ..tasks.time import (
     drift_loop, echo_trail, ping_pong, time_patch, time_scrub, temporal_fft,
     temporal_gradient, temporal_median, axis_swap,
+    temporal_morph, depth_slice, temporal_equalize,
+    temporal_displace, spectral_remix, phase_scramble,
 )
 
 
@@ -186,6 +188,100 @@ def time_lab_axis_swap(
     return axis_swap(src, out, axis=axis, seed=seed, cfg=c)
 
 
+@flow(name="time-lab-temporal-morph", log_prints=True)
+def time_lab_temporal_morph(
+    src: Path,
+    output: Optional[Path] = None,
+    operation: str = "dilate",
+    window: int = 5,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Temporal morphology — min/max along time axis."""
+    c = cfg or Config()
+    c.ensure_dirs()
+    out = output or c.output_dir / "temporal_morph.mp4"
+    return temporal_morph(src, out, operation=operation, window=window, seed=seed, cfg=c)
+
+
+@flow(name="time-lab-depth-slice", log_prints=True)
+def time_lab_depth_slice(
+    src: Path,
+    output: Optional[Path] = None,
+    angle: float = 45.0,
+    axis: str = "horizontal",
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Depth slice — angled scan plane through spacetime."""
+    c = cfg or Config()
+    c.ensure_dirs()
+    out = output or c.output_dir / "depth_slice.mp4"
+    return depth_slice(src, out, angle=angle, axis=axis, seed=seed, cfg=c)
+
+
+@flow(name="time-lab-temporal-equalize", log_prints=True)
+def time_lab_temporal_equalize(
+    src: Path,
+    output: Optional[Path] = None,
+    strength: float = 1.0,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Temporal equalize — per-pixel histogram equalization along time."""
+    c = cfg or Config()
+    c.ensure_dirs()
+    out = output or c.output_dir / "temporal_equalize.mp4"
+    return temporal_equalize(src, out, strength=strength, seed=seed, cfg=c)
+
+
+@flow(name="time-lab-temporal-displace", log_prints=True)
+def time_lab_temporal_displace(
+    src: Path,
+    output: Optional[Path] = None,
+    amount: float = 0.5,
+    channel: str = "luma",
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Temporal displace — brightness drives time index lookup."""
+    c = cfg or Config()
+    c.ensure_dirs()
+    out = output or c.output_dir / "temporal_displace.mp4"
+    return temporal_displace(src, out, amount=amount, channel=channel, seed=seed, cfg=c)
+
+
+@flow(name="time-lab-spectral-remix", log_prints=True)
+def time_lab_spectral_remix(
+    src: Path,
+    output: Optional[Path] = None,
+    mode: str = "swap",
+    amount: float = 0.3,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Spectral remix — rearrange FFT frequency bins."""
+    c = cfg or Config()
+    c.ensure_dirs()
+    out = output or c.output_dir / "spectral_remix.mp4"
+    return spectral_remix(src, out, mode=mode, amount=amount, seed=seed, cfg=c)
+
+
+@flow(name="time-lab-phase-scramble", log_prints=True)
+def time_lab_phase_scramble(
+    src: Path,
+    output: Optional[Path] = None,
+    amount: float = 1.0,
+    seed: Optional[int] = None,
+    cfg: Optional[Config] = None,
+) -> Path:
+    """Phase scramble — randomize FFT phases, preserve magnitudes."""
+    c = cfg or Config()
+    c.ensure_dirs()
+    out = output or c.output_dir / "phase_scramble.mp4"
+    return phase_scramble(src, out, amount=amount, seed=seed, cfg=c)
+
+
 # Keep backward-compatible alias
 time_lab = time_lab_scrub
 
@@ -322,6 +418,68 @@ def _cli():
     p_swap.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducibility")
 
+    # --- temporal-morph ---
+    p_morph = sub.add_parser("temporal-morph",
+                              help="Temporal morphology (dilate/erode/open/close)")
+    p_morph.add_argument("src", type=Path, help="Source video file")
+    p_morph.add_argument("-o", "--output", type=Path, default=None)
+    p_morph.add_argument("--operation", type=str, default="dilate",
+                          choices=["dilate", "erode", "open", "close"])
+    p_morph.add_argument("--window", type=int, default=5,
+                          help="Kernel size in frames (default: 5)")
+    p_morph.add_argument("--seed", type=int, default=None)
+
+    # --- depth-slice ---
+    p_dslice = sub.add_parser("depth-slice",
+                               help="Angled scan plane through spacetime")
+    p_dslice.add_argument("src", type=Path, help="Source video file")
+    p_dslice.add_argument("-o", "--output", type=Path, default=None)
+    p_dslice.add_argument("--angle", type=float, default=45.0,
+                           help="Slice angle in degrees (default: 45)")
+    p_dslice.add_argument("--axis", type=str, default="horizontal",
+                           choices=["horizontal", "vertical"])
+    p_dslice.add_argument("--seed", type=int, default=None)
+
+    # --- temporal-equalize ---
+    p_teq = sub.add_parser("temporal-equalize",
+                            help="Per-pixel histogram equalization along time")
+    p_teq.add_argument("src", type=Path, help="Source video file")
+    p_teq.add_argument("-o", "--output", type=Path, default=None)
+    p_teq.add_argument("--strength", type=float, default=1.0,
+                        help="Blend 0=original 1=full equalize (default: 1.0)")
+    p_teq.add_argument("--seed", type=int, default=None)
+
+    # --- temporal-displace ---
+    p_tdisp = sub.add_parser("temporal-displace",
+                              help="Brightness-driven time index warp")
+    p_tdisp.add_argument("src", type=Path, help="Source video file")
+    p_tdisp.add_argument("-o", "--output", type=Path, default=None)
+    p_tdisp.add_argument("--amount", type=float, default=0.5,
+                          help="Displacement strength 0-1 (default: 0.5)")
+    p_tdisp.add_argument("--channel", type=str, default="luma",
+                          choices=["luma", "r", "g", "b"])
+    p_tdisp.add_argument("--seed", type=int, default=None)
+
+    # --- spectral-remix ---
+    p_sremix = sub.add_parser("spectral-remix",
+                               help="Rearrange FFT frequency bins")
+    p_sremix.add_argument("src", type=Path, help="Source video file")
+    p_sremix.add_argument("-o", "--output", type=Path, default=None)
+    p_sremix.add_argument("--mode", type=str, default="swap",
+                           choices=["swap", "reverse", "rotate", "shuffle"])
+    p_sremix.add_argument("--amount", type=float, default=0.3,
+                           help="Blend strength 0=original 1=full rearrangement (default: 0.3)")
+    p_sremix.add_argument("--seed", type=int, default=None)
+
+    # --- phase-scramble ---
+    p_pscr = sub.add_parser("phase-scramble",
+                             help="Randomize FFT phases, keep magnitudes")
+    p_pscr.add_argument("src", type=Path, help="Source video file")
+    p_pscr.add_argument("-o", "--output", type=Path, default=None)
+    p_pscr.add_argument("--amount", type=float, default=1.0,
+                         help="Scramble strength 0-1 (default: 1.0)")
+    p_pscr.add_argument("--seed", type=int, default=None)
+
     args = parser.parse_args()
     cfg = Config()
     cfg.ensure_dirs()
@@ -377,6 +535,40 @@ def _cli():
         time_lab_axis_swap(
             src=args.src, output=args.output,
             axis=args.axis, seed=args.seed, cfg=cfg,
+        )
+    elif args.command == "temporal-morph":
+        time_lab_temporal_morph(
+            src=args.src, output=args.output,
+            operation=args.operation, window=args.window,
+            seed=args.seed, cfg=cfg,
+        )
+    elif args.command == "depth-slice":
+        time_lab_depth_slice(
+            src=args.src, output=args.output,
+            angle=args.angle, axis=args.axis,
+            seed=args.seed, cfg=cfg,
+        )
+    elif args.command == "temporal-equalize":
+        time_lab_temporal_equalize(
+            src=args.src, output=args.output,
+            strength=args.strength, seed=args.seed, cfg=cfg,
+        )
+    elif args.command == "temporal-displace":
+        time_lab_temporal_displace(
+            src=args.src, output=args.output,
+            amount=args.amount, channel=args.channel,
+            seed=args.seed, cfg=cfg,
+        )
+    elif args.command == "spectral-remix":
+        time_lab_spectral_remix(
+            src=args.src, output=args.output,
+            mode=args.mode, amount=args.amount,
+            seed=args.seed, cfg=cfg,
+        )
+    elif args.command == "phase-scramble":
+        time_lab_phase_scramble(
+            src=args.src, output=args.output,
+            amount=args.amount, seed=args.seed, cfg=cfg,
         )
 
 

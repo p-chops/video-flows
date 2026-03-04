@@ -102,6 +102,12 @@ from ..recipe import (
     TemporalGradientStep,
     TemporalMedianStep,
     AxisSwapStep,
+    TemporalMorphStep,
+    DepthSliceStep,
+    TemporalEqualizeStep,
+    TemporalDisplaceStep,
+    SpectralRemixStep,
+    PhaseScrambleStep,
     BlendComposite,
     MaskedComposite,
     RandomComposite,
@@ -153,6 +159,12 @@ from ..tasks import (
     temporal_gradient,
     temporal_median,
     axis_swap,
+    temporal_morph,
+    depth_slice,
+    temporal_equalize,
+    temporal_displace,
+    spectral_remix,
+    phase_scramble,
     fused_time_chain,
 )
 
@@ -617,11 +629,14 @@ _TIME_STEP_TYPES = (
     FlowWarpStep, TemporalSortStep, ExtremaHoldStep, FeedbackTransformStep,
     ScanRefreshStep, TemporalFFTStep,
     TemporalGradientStep, TemporalMedianStep, AxisSwapStep,
+    TemporalMorphStep, DepthSliceStep, TemporalEqualizeStep,
+    TemporalDisplaceStep, SpectralRemixStep, PhaseScrambleStep,
 )
 
 # Time steps that don't consume a seed from the RNG in _submit_step
 _SEEDLESS_TIME_STEPS = (EchoStep, SmearStep, BloomStep, StackStep, ScanRefreshStep,
-                        TemporalGradientStep, TemporalMedianStep, AxisSwapStep)
+                        TemporalGradientStep, TemporalMedianStep, AxisSwapStep,
+                        TemporalMorphStep, DepthSliceStep, TemporalEqualizeStep)
 
 
 def _group_steps(recipe_steps: list) -> list[list]:
@@ -856,6 +871,33 @@ def _submit_step(
         case AxisSwapStep(axis=axis):
             return axis_swap.submit(
                 src, dst, axis=axis, cfg=cfg,
+            )
+        case TemporalMorphStep(operation=operation, window=window):
+            return temporal_morph.submit(
+                src, dst, operation=operation, window=window, cfg=cfg,
+            )
+        case DepthSliceStep(angle=angle, axis=axis):
+            return depth_slice.submit(
+                src, dst, angle=angle, axis=axis, cfg=cfg,
+            )
+        case TemporalEqualizeStep(strength=strength):
+            return temporal_equalize.submit(
+                src, dst, strength=strength, cfg=cfg,
+            )
+        case TemporalDisplaceStep(amount=amount, channel=channel):
+            return temporal_displace.submit(
+                src, dst, amount=amount, channel=channel,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case SpectralRemixStep(mode=mode, amount=amount):
+            return spectral_remix.submit(
+                src, dst, mode=mode, amount=amount,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
+            )
+        case PhaseScrambleStep(amount=amount):
+            return phase_scramble.submit(
+                src, dst, amount=amount,
+                seed=rng.randint(0, 2 ** 31), cfg=cfg,
             )
         case _:
             raise ValueError(f"Unknown step type: {type(step).__name__}")

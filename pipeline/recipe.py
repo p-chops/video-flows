@@ -239,13 +239,49 @@ class AxisSwapStep:
     """Axis swap — view frame volume from the side (swap time with space)."""
     axis: str = "horizontal"  # "horizontal" (T↔X) or "vertical" (T↔Y)
 
+@dataclass
+class TemporalMorphStep:
+    """Temporal morphology — dilate/erode/open/close along time axis."""
+    operation: str = "dilate"
+    window: int = 5
+
+@dataclass
+class DepthSliceStep:
+    """Depth slice — angled scan plane through spacetime volume."""
+    angle: float = 45.0
+    axis: str = "horizontal"
+
+@dataclass
+class TemporalEqualizeStep:
+    """Temporal equalize — per-pixel histogram equalization along time."""
+    strength: float = 1.0
+
+@dataclass
+class TemporalDisplaceStep:
+    """Temporal displace — brightness indexes into time axis."""
+    amount: float = 0.5
+    channel: str = "luma"
+
+@dataclass
+class SpectralRemixStep:
+    """Spectral remix — rearrange FFT frequency bins along time."""
+    mode: str = "swap"
+    amount: float = 0.3
+
+@dataclass
+class PhaseScrambleStep:
+    """Phase scramble — randomize temporal phases, preserve magnitudes."""
+    amount: float = 1.0
+
 Step = (CrushStep | ShaderStep | NormalizeStep | ScrubStep | DriftStep
         | PingPongStep | EchoStep | PatchStep | SlitScanStep | TemporalTileStep
         | SmearStep | BloomStep | StackStep | SlipStep
         | MirrorStep | ZoomStep | InvertStep | HueShiftStep | SaturateStep
         | FlowWarpStep | TemporalSortStep | ExtremaHoldStep | FeedbackTransformStep
         | QuadLoopStep | ScanRefreshStep | TemporalFFTStep
-        | TemporalGradientStep | TemporalMedianStep | AxisSwapStep)
+        | TemporalGradientStep | TemporalMedianStep | AxisSwapStep
+        | TemporalMorphStep | DepthSliceStep | TemporalEqualizeStep
+        | TemporalDisplaceStep | SpectralRemixStep | PhaseScrambleStep)
 
 
 # ─── Transitions ──────────────────────────────────────────────────────────────
@@ -619,6 +655,21 @@ def _step_to_dict(s: Step) -> dict:
             return {"type": "temporal_median", "window": s.window}
         case AxisSwapStep():
             return {"type": "axis_swap", "axis": s.axis}
+        case TemporalMorphStep():
+            return {"type": "temporal_morph", "operation": s.operation,
+                    "window": s.window}
+        case DepthSliceStep():
+            return {"type": "depth_slice", "angle": s.angle, "axis": s.axis}
+        case TemporalEqualizeStep():
+            return {"type": "temporal_equalize", "strength": s.strength}
+        case TemporalDisplaceStep():
+            return {"type": "temporal_displace", "amount": s.amount,
+                    "channel": s.channel}
+        case SpectralRemixStep():
+            return {"type": "spectral_remix", "mode": s.mode,
+                    "amount": s.amount}
+        case PhaseScrambleStep():
+            return {"type": "phase_scramble", "amount": s.amount}
         case _:
             raise ValueError(f"Unknown step type: {type(s).__name__}")
 
@@ -709,6 +760,22 @@ def _step_from_dict(d: dict) -> Step:
         return TemporalMedianStep(window=d.get("window", 7))
     elif t == "axis_swap":
         return AxisSwapStep(axis=d.get("axis", "horizontal"))
+    elif t == "temporal_morph":
+        return TemporalMorphStep(operation=d.get("operation", "dilate"),
+                                  window=d.get("window", 5))
+    elif t == "depth_slice":
+        return DepthSliceStep(angle=d.get("angle", 45.0),
+                               axis=d.get("axis", "horizontal"))
+    elif t == "temporal_equalize":
+        return TemporalEqualizeStep(strength=d.get("strength", 1.0))
+    elif t == "temporal_displace":
+        return TemporalDisplaceStep(amount=d.get("amount", 0.5),
+                                     channel=d.get("channel", "luma"))
+    elif t == "spectral_remix":
+        return SpectralRemixStep(mode=d.get("mode", "swap"),
+                                      amount=d.get("amount", 0.3))
+    elif t == "phase_scramble":
+        return PhaseScrambleStep(amount=d.get("amount", 1.0))
     else:
         raise ValueError(f"Unknown step type: {t}")
 
@@ -2012,6 +2079,8 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
         FlowWarpStep, TemporalSortStep, FeedbackTransformStep,
         ScanRefreshStep, TemporalFFTStep,
         TemporalGradientStep, TemporalMedianStep, AxisSwapStep,
+        TemporalMorphStep, DepthSliceStep,
+        TemporalDisplaceStep,
     ])
     if cls is ScrubStep:
         return ScrubStep(
@@ -2127,6 +2196,34 @@ def _random_time_step(rng: _random_mod.Random, complexity: float = 0.5) -> Step:
     elif cls is AxisSwapStep:
         return AxisSwapStep(
             axis=rng.choice(["horizontal", "vertical"]),
+        )
+    elif cls is TemporalMorphStep:
+        return TemporalMorphStep(
+            operation=rng.choice(["dilate", "erode", "open", "close"]),
+            window=rng.choice([3, 5, 7, 9, 11, 15]),
+        )
+    elif cls is DepthSliceStep:
+        return DepthSliceStep(
+            angle=rng.uniform(10.0, 80.0),
+            axis=rng.choice(["horizontal", "vertical"]),
+        )
+    elif cls is TemporalEqualizeStep:
+        return TemporalEqualizeStep(
+            strength=rng.uniform(0.3, 1.0),
+        )
+    elif cls is TemporalDisplaceStep:
+        return TemporalDisplaceStep(
+            amount=rng.uniform(0.1, 0.5 + complexity * 0.5),
+            channel=rng.choice(["luma", "r", "g", "b"]),
+        )
+    elif cls is SpectralRemixStep:
+        return SpectralRemixStep(
+            mode=rng.choice(["swap", "rotate"]),
+            amount=rng.uniform(0.2, 0.4),
+        )
+    elif cls is PhaseScrambleStep:
+        return PhaseScrambleStep(
+            amount=rng.uniform(0.3, 0.7 + complexity * 0.3),
         )
     else:  # FlowWarpStep
         return FlowWarpStep(
