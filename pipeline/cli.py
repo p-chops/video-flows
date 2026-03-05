@@ -11,6 +11,9 @@ Thin dispatcher that calls existing @flow functions from pipeline.flows.
     vf show input.mp4 --archetype deep_time --seed 42
     vf show --archetype cascade --seed 42
 
+    vf stack crt_mosaic input.mp4 --seed 42
+    vf stack terrain_scan --seed 42
+
     vf pack create my_effects ~/shaders/
     vf pack stacks packs/my_effects/
 """
@@ -265,6 +268,94 @@ def _handle_preset(args, src, cfg):
     brain_wipe(recipe, cfg=cfg)
 
 
+# ── vf stack ─────────────────────────────────────────────────────────────────
+
+def _add_stack_parser(sub):
+    p = sub.add_parser("stack", help="Run a named shader stack")
+    p.add_argument("name", help="Stack name (e.g., crt_mosaic, terrain_scan)")
+    p.add_argument("src", nargs="?", type=str, default=None,
+                   help="Source footage (omit for generator)")
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--duration", type=float, default=10.0,
+                   help="Clip duration (seconds)")
+    p.add_argument("--width", type=int, default=1280)
+    p.add_argument("--height", type=int, default=720)
+    p.add_argument("--pack", action="append", dest="packs",
+                   help="Restrict pack search (repeatable)")
+    p.add_argument("-o", "--output", type=Path, default=None)
+    p.set_defaults(func=_handle_stack)
+
+
+def _handle_stack(args):
+    import random as _random
+    from pipeline.config import Config
+    from pipeline.recipe import (
+        load_boutique_stacks, _resolve_shader_params,
+        ShaderStep, NormalizeStep, Lane, BrainWipeRecipe,
+        FootageSource, GeneratorSource,
+    )
+    from pipeline.flows.brain_wipe import brain_wipe
+
+    cfg = Config(packs=getattr(args, "packs", None))
+    cfg.ensure_dirs()
+
+    # Load all stacks, optionally filtered by pack
+    all_stacks = load_boutique_stacks()
+    if cfg.packs:
+        all_stacks = [s for s in all_stacks if s[3].parent.name in cfg.packs]
+
+    # Find the named stack
+    matches = [s for s in all_stacks if s[0] == args.name]
+    if not matches:
+        available = sorted(set(s[0] for s in all_stacks))
+        print(f"Error: stack '{args.name}' not found")
+        print(f"Available ({len(available)}): {', '.join(available)}")
+        sys.exit(1)
+
+    name, shader_names, params_spec, shader_base = matches[0]
+    rng = _random.Random(args.seed)
+
+    # Build ShaderStep
+    shader_paths = [shader_base / f"{s}.fs" for s in shader_names]
+    param_overrides = _resolve_shader_params(rng, params_spec) or None
+    steps = [
+        ShaderStep(shader_paths=shader_paths, param_overrides=param_overrides),
+        NormalizeStep(),
+    ]
+
+    # Source
+    dur = args.duration
+    if args.src:
+        source = FootageSource(
+            path=Path(args.src), method="random",
+            min_dur=dur, max_dur=dur,
+        )
+    else:
+        source = GeneratorSource(min_dur=dur, max_dur=dur, n_warps=1)
+
+    lane = Lane(source=source, n_segments=1, recipe=steps, sequencing="concat")
+    recipe = BrainWipeRecipe(
+        lanes=[lane],
+        width=args.width, height=args.height,
+        seed=args.seed,
+    )
+
+    if args.output:
+        recipe.output = args.output
+
+    chain = " → ".join(shader_names)
+    pack_name = shader_base.parent.name
+    print(f"Stack: {name} ({pack_name})")
+    print(f"  {chain}")
+    if param_overrides:
+        for shader_stem, params in param_overrides.items():
+            vals = ", ".join(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}"
+                            for k, v in params.items())
+            print(f"  {shader_stem}: {vals}")
+
+    brain_wipe(recipe, cfg=cfg)
+
+
 # ── vf pack ──────────────────────────────────────────────────────────────────
 
 def _add_pack_parsers(sub):
@@ -484,6 +575,7 @@ def main():
 
     _add_reel_parsers(sub)
     _add_show_parser(sub)
+    _add_stack_parser(sub)
     _add_pack_parsers(sub)
 
     # Handle bare "vf" with no args
