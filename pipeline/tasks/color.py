@@ -153,7 +153,7 @@ class QualityThresholds:
     Set to 0.0 to disable.
     """
 
-    brightness_floor: float = 0.08       # below → reroll (too dark to salvage)
+    brightness_floor: float = 0.05       # below → reroll (too dark to salvage)
     contrast_floor: float = 0.05         # below → reroll (completely flat)
     motion_floor: float = 0.005          # below → reroll (stasis)
     temporal_variance_floor: float = 0.002  # below → reroll (monotonous)
