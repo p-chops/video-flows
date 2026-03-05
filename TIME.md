@@ -139,11 +139,11 @@ These effects are still available for direct recipe construction, but are exclud
 Force the `deep_time` archetype to get pure temporal processing:
 
 ```bash
-python -m pipeline.flows.show_reel run -n 8 --archetype deep_time --src input/clip.mp4 --footage-ratio 1.0 --seed 42
+vf reel -n 8 --archetype deep_time --src input/clip.mp4 --footage-ratio 1.0 --seed 42
 ```
 
 Or use `cascade` for time effects mixed with shaders and/or crush:
 
 ```bash
-python -m pipeline.flows.show_reel run -n 8 --archetype cascade --src input/clip.mp4 --footage-ratio 1.0 --seed 42
+vf reel -n 8 --archetype cascade --src input/clip.mp4 --footage-ratio 1.0 --seed 42
 ```
