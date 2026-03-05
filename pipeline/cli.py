@@ -233,10 +233,7 @@ def _handle_show(args):
         packs=cfg.packs,
     )
 
-    if args.output:
-        recipe.output = args.output
-
-    brain_wipe(recipe, cfg=cfg)
+    brain_wipe(recipe, output=args.output, cfg=cfg)
 
 
 def _handle_preset(args, src, cfg):
@@ -263,9 +260,7 @@ def _handle_preset(args, src, cfg):
         sys.exit(1)
 
     recipe = builder()
-    if args.output:
-        recipe.output = args.output
-    brain_wipe(recipe, cfg=cfg)
+    brain_wipe(recipe, output=args.output, cfg=cfg)
 
 
 # ── vf stack ─────────────────────────────────────────────────────────────────
@@ -340,9 +335,6 @@ def _handle_stack(args):
         seed=args.seed,
     )
 
-    if args.output:
-        recipe.output = args.output
-
     chain = " → ".join(shader_names)
     pack_name = shader_base.parent.name
     print(f"Stack: {name} ({pack_name})")
@@ -353,7 +345,7 @@ def _handle_stack(args):
                             for k, v in params.items())
             print(f"  {shader_stem}: {vals}")
 
-    brain_wipe(recipe, cfg=cfg)
+    brain_wipe(recipe, output=args.output, cfg=cfg)
 
 
 # ── vf pack ──────────────────────────────────────────────────────────────────
