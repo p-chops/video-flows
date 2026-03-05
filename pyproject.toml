@@ -16,6 +16,9 @@ dependencies = [
     "PyYAML>=6.0",
 ]
 
+[project.scripts]
+vf = "pipeline.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["pipeline*"]
 
