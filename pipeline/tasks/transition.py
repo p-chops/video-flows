@@ -832,9 +832,25 @@ def _make_slide_blender(direction: str):
     return blend
 
 
+def _make_crossfade_blender():
+    """Simple linear crossfade."""
+    def blend(tail, head, n, h, w):
+        for i in range(n):
+            t = (i + 1) / (n + 1)
+            blended = np.clip(
+                (1.0 - t) * tail[i].astype(np.float32)
+                + t * head[i].astype(np.float32),
+                0, 255,
+            ).astype(np.uint8)
+            yield blended
+    return blend
+
+
 def _make_blender(transition_type: str, seed: Optional[int], **kwargs):
     """Dispatch to the appropriate blender factory."""
-    if transition_type == "luma_wipe":
+    if transition_type == "crossfade":
+        return _make_crossfade_blender()
+    elif transition_type == "luma_wipe":
         return _make_luma_wipe_blender(
             pattern=kwargs.get("pattern", "horizontal"),
             softness=kwargs.get("softness", 0.1),
@@ -888,17 +904,7 @@ def _make_random_blender(seed: int):
     t_type = rng.choice(_RANDOM_TRANSITION_TYPES)
 
     if t_type == "crossfade":
-        # Crossfade as a blender — simple linear interpolation
-        def blend(tail, head, n, h, w):
-            for i in range(n):
-                t = (i + 1) / (n + 1)
-                blended = np.clip(
-                    (1.0 - t) * tail[i].astype(np.float32)
-                    + t * head[i].astype(np.float32),
-                    0, 255,
-                ).astype(np.uint8)
-                yield blended
-        return blend
+        return _make_crossfade_blender()
     elif t_type == "luma_wipe":
         pattern = str(rng.choice(_WIPE_PATTERNS))
         softness = float(rng.uniform(0.05, 0.4))
@@ -933,47 +939,6 @@ def _make_random_blender(seed: int):
 
 
 # ── Multi-clip chaining ──────────────────────────────────────────────────────
-
-def _xfade_chain(
-    clips: list[Path], dst: Path, duration: float, cfg: Config, log,
-) -> Path:
-    """Chain N clips with crossfade transitions in one ffmpeg call."""
-    inputs: list[str] = []
-    for clip in clips:
-        inputs += ["-i", str(clip)]
-
-    durations = [probe(clip, cfg).duration for clip in clips]
-
-    filter_parts = []
-    cumulative_offset = durations[0] - duration
-    for i in range(1, len(clips)):
-        src = "[0:v]" if i == 1 else f"[v{i - 1}]"
-        overlay = f"[{i}:v]"
-        out_label = "" if i == len(clips) - 1 else f"[v{i}]"
-        filter_parts.append(
-            f"{src}{overlay}xfade=transition=fade"
-            f":duration={duration}:offset={cumulative_offset:.6f}{out_label}"
-        )
-        if i < len(clips) - 1:
-            cumulative_offset += durations[i] - duration
-
-    filter_graph = ";".join(filter_parts)
-    total_dur = sum(durations) - duration * (len(clips) - 1)
-
-    log.info("xfade-chain: %d clips, %.2fs transitions → %s (%.1fs total)",
-             len(clips), duration, dst.name, total_dur)
-
-    run_ffmpeg_logged([
-        cfg.ffmpeg_bin, "-y", "-loglevel", cfg.ffmpeg_loglevel,
-        *inputs,
-        "-filter_complex", filter_graph,
-        "-an",
-        *cfg.encode_args(),
-        str(dst),
-    ], duration=total_dur, logger=log, label="xfade-chain")
-
-    return dst
-
 
 def _streaming_chain(
     clips: list[Path], dst: Path, transition_type: str,
@@ -1111,12 +1076,13 @@ def transition_sequence(
     """
     Join multiple clips with transitions between each adjacent pair.
 
-    For crossfade: chained ffmpeg xfade filters (single invocation).
-    For luma_wipe / whip_pan / static_burst / flash: streaming chain
-    (single FrameWriter, each clip read exactly once).
+    All transition types use the streaming chain (single FrameWriter,
+    each clip read exactly once).
 
     transition_type: "crossfade", "luma_wipe", "whip_pan", "static_burst",
-                     "flash", "random" (picks a different type per pair)
+                     "flash", "slide", "dissolve", "zoom", "pixelate",
+                     "melt", "interlace", "squeeze",
+                     "random" (picks a different type per pair)
     duration:        transition length in seconds
     **kwargs:        passed to underlying transition (pattern, softness,
                      direction, blur_strength, decay)
@@ -1130,8 +1096,5 @@ def transition_sequence(
             return dst
         raise ValueError("Need at least one clip")
 
-    if transition_type == "crossfade":
-        return _xfade_chain(clips, dst, duration, c, log)
-    else:
-        return _streaming_chain(clips, dst, transition_type, duration,
-                                seed, c, log, **kwargs)
+    return _streaming_chain(clips, dst, transition_type, duration,
+                            seed, c, log, **kwargs)
