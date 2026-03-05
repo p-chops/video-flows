@@ -2097,15 +2097,15 @@ def _build_deep_time(
     target_dur: Optional[float],
     seed: Optional[int],
 ) -> BrainWipeRecipe:
-    """5–8 stacked time effects, pure temporal. No shaders."""
+    """3–5 stacked time effects, pure temporal. No shaders."""
     actual_segments = _resolve_segments(rng, complexity, n_segments)
     wants_transition = use_transitions if use_transitions is not None else (
         rng.random() < 0.2 + 0.6 * complexity
     )
     seg_target = _seg_dur_target(target_dur, actual_segments, wants_transition)
 
-    n_time = n_steps or max(5, int(5 + complexity * 3))
-    n_time = min(n_time, 8)
+    n_time = n_steps or max(3, int(3 + complexity * 2))
+    n_time = min(n_time, 5)
     steps: list[Step] = []
     for _ in range(n_time):
         steps.append(_random_time_step(rng, complexity))
@@ -2155,7 +2155,7 @@ def _build_temporal_sandwich(
                             seed=seed, wants_post=wants_post)
 
 
-def _build_spatial_cascade(
+def _build_cascade(
     rng: _random_mod.Random,
     complexity: float,
     src: Optional[Path],
@@ -2168,7 +2168,7 @@ def _build_spatial_cascade(
     target_dur: Optional[float],
     seed: Optional[int],
 ) -> BrainWipeRecipe:
-    """S→T: Shader stacks build a visual world, time effects animate it."""
+    """Sample 2–3 domains from {S, T, C} and chain them in random order."""
     actual_segments = _resolve_segments(rng, complexity, n_segments)
     wants_transition = use_transitions if use_transitions is not None else (
         rng.random() < 0.2 + 0.6 * complexity
@@ -2178,19 +2178,30 @@ def _build_spatial_cascade(
     source = _random_source(rng, src, use_generators, complexity)
     is_footage = isinstance(source, FootageSource)
 
-    steps: list[Step] = []
-    # 1–2 boutique shader stacks (footage: always 1)
-    steps.append(_shader_step(rng, complexity))
-    if not is_footage and complexity > 0.5 and rng.random() < 0.5:
-        steps.append(_shader_step(rng, complexity))
-    steps.append(NormalizeStep())
+    # Sample 2–3 domains; higher complexity favours 3
+    n_domains = 2 if rng.random() > complexity else 3
+    domains = rng.sample(["S", "T", "C"], n_domains)
 
-    # 2–4 time effects; footage gets fewer to preserve source character
-    n_time = max(2, int(2 + complexity * 2))
-    if is_footage:
-        n_time = max(1, n_time - 1)
-    for _ in range(n_time):
-        steps.append(_random_time_step(rng, complexity))
+    steps: list[Step] = []
+    for domain in domains:
+        if domain == "S":
+            steps.append(_shader_step(rng, complexity))
+            steps.append(NormalizeStep())
+        elif domain == "T":
+            n_time = max(1, int(1 + complexity * 2))
+            if is_footage:
+                n_time = max(1, n_time - 1)
+            for _ in range(n_time):
+                steps.append(_random_time_step(rng, complexity))
+        elif domain == "C":
+            crush_val = rng.uniform(0.7, 1.0)
+            codec = rng.choice(["libx264", "libx264", "mpeg4"])
+            downscale = rng.choice([1.0, 1.0, 2.0]) if complexity > 0.5 else 1.0
+            steps.append(CrushStep(crush=crush_val, codec=codec, downscale=downscale))
+
+    # Ensure normalize at the end if not already there
+    if not isinstance(steps[-1], NormalizeStep):
+        steps.append(NormalizeStep())
 
     lane = _make_lane(rng, source=source, steps=steps, n_segments=actual_segments,
                       wants_transition=wants_transition, seg_target=seg_target)
@@ -2199,53 +2210,7 @@ def _build_spatial_cascade(
                             seed=seed, wants_post=False)
 
 
-def _eligible_spatial_cascade(src, n_lanes, use_generators):
-    return n_lanes is None or n_lanes == 1
-
-
-def _build_temporal_cascade(
-    rng: _random_mod.Random,
-    complexity: float,
-    src: Optional[Path],
-    *,
-    n_lanes: Optional[int],
-    n_steps: Optional[int],
-    n_segments: Optional[int],
-    use_transitions: Optional[bool],
-    use_generators: Optional[bool],
-    target_dur: Optional[float],
-    seed: Optional[int],
-) -> BrainWipeRecipe:
-    """T→S: Time effects create motion texture, shaders give it visual identity."""
-    actual_segments = _resolve_segments(rng, complexity, n_segments)
-    wants_transition = use_transitions if use_transitions is not None else (
-        rng.random() < 0.2 + 0.6 * complexity
-    )
-    seg_target = _seg_dur_target(target_dur, actual_segments, wants_transition)
-
-    source = _random_source(rng, src, use_generators, complexity)
-    is_footage = isinstance(source, FootageSource)
-
-    steps: list[Step] = []
-    # 2–4 time effects; footage gets fewer to preserve source character
-    n_time = max(2, int(2 + complexity * 2))
-    if is_footage:
-        n_time = max(1, n_time - 1)
-    for _ in range(n_time):
-        steps.append(_random_time_step(rng, complexity))
-
-    # 1 boutique shader stack + normalize
-    steps.append(_shader_step(rng, complexity))
-    steps.append(NormalizeStep())
-
-    lane = _make_lane(rng, source=source, steps=steps, n_segments=actual_segments,
-                      wants_transition=wants_transition, seg_target=seg_target)
-
-    return _assemble_recipe([lane], rng=rng, complexity=complexity, src=src,
-                            seed=seed, wants_post=False)
-
-
-def _eligible_temporal_cascade(src, n_lanes, use_generators):
+def _eligible_cascade(src, n_lanes, use_generators):
     return n_lanes is None or n_lanes == 1
 
 
@@ -2992,16 +2957,15 @@ def _eligible_deep_space(src, n_lanes, use_generators):
 
 # (builder, eligibility_fn, weight) — weight controls selection probability
 #
-# 4 core archetypes on a spatial ←→ temporal axis:
-#   deep_space (pure S) — spatial_cascade (S→T) — temporal_cascade (T→S) — deep_time (pure T)
-# Plus codec_crush as a low-weight texture variant.
+# 3 pure-domain poles + 1 multi-domain mixer:
+#   deep_space (pure S), deep_time (pure T), codec_crush (pure C)
+#   cascade (2–3 of {S, T, C} in random order)
 #
 _ARCHETYPES: dict[str, tuple] = {
     "deep_space":        (_build_deep_space, _eligible_deep_space, 3.0),
     "deep_time":         (_build_deep_time, _eligible_deep_time, 2.0),
-    "spatial_cascade":   (_build_spatial_cascade, _eligible_spatial_cascade, 1.5),
-    "temporal_cascade":  (_build_temporal_cascade, _eligible_temporal_cascade, 1.5),
     "codec_crush":       (_build_codec_crush, _eligible_codec_crush, 0.5),
+    "cascade":           (_build_cascade, _eligible_cascade, 3.0),
     # --- disabled ---
     # "crush_sandwich":    (_build_crush_sandwich, _eligible_crush_sandwich, 1.0),  # crush kills motion
     # "temporal_sandwich": (_build_temporal_sandwich, _eligible_temporal_sandwich, 2.0),  # replaced by cascades
