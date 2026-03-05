@@ -55,7 +55,7 @@ See [PACKS.md](PACKS.md) for the full guide on creating and curating packs.
 
 ## CLI
 
-The `vf` command is the main entry point. Three subcommands: `reel`, `show`, `pack`.
+The `vf` command is the main entry point. Four subcommands: `reel`, `show`, `stack`, `pack`.
 
 ### Show reels
 
@@ -110,9 +110,32 @@ vf show input/footage.mp4 --preset stooges --seed 42
 vf show --archetype cascade --complexity 0.7 --duration 15 --seed 42
 ```
 
+### Named stacks
+
+Run a specific shader stack by name via `vf stack`:
+
+```bash
+# Run a stack on source footage
+vf stack crt_mosaic input/footage.mp4 --seed 42
+
+# Run a stack with a generator (no source needed)
+vf stack terrain_scan --seed 42
+
+# Restrict to a specific pack
+vf stack crt_mosaic --pack my_effects --duration 15 --seed 42
+```
+
 ### Pack management
 
 ```bash
+# List installed packs
+vf pack list
+vf pack list -v                  # include stack names
+
+# Inspect a pack
+vf pack info starter
+vf pack info my_effects -v       # full stack chains and params
+
 # Create a pack from a folder of ISF shaders
 vf pack create my_effects ~/Downloads/cool_shaders/
 
