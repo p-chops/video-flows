@@ -27,9 +27,8 @@ Each effect uses a memory strategy appropriate to its access pattern:
 
 The `random_recipe()` generator picks time effects from a weighted pool. Each archetype uses them differently:
 
-- **deep_time** — 5–8 stacked time effects, pure temporal destruction
-- **spatial_cascade** — shaders first, then 2–4 time effects animate the result
-- **temporal_cascade** — 2–4 time effects first, then shaders give visual identity
+- **deep_time** — 3–5 stacked time effects, pure temporal destruction
+- **cascade** — 2–3 domains from {shaders, time, crush} in random order; the time domain contributes 1–3 effects
 
 ## Effects
 
@@ -113,7 +112,7 @@ These operate on the video's temporal frequency content via FFT.
 
 ### Removed from random pool
 
-These effects are still available for manual use via the time lab or direct recipe construction, but are excluded from automatic recipe generation because they tend toward stasis — they compound with other effects to freeze the output.
+These effects are still available for direct recipe construction, but are excluded from automatic recipe generation because they tend toward stasis — they compound with other effects to freeze the output.
 
 **extrema_hold** — Tracks per-pixel min or max over time. Mode='max' drives to white; mode='min' drives to black. With decay=0, the effect is permanent.
 
@@ -135,14 +134,16 @@ These effects are still available for manual use via the time lab or direct reci
 
 **frame_stack** — Sliding window reduction (mean/max/min) across frames. Mean = motion blur; max/min = temporal extrema.
 
-## Testing individual effects
+## Using time effects
 
-The time lab provides a CLI for trying any effect on a clip:
+Force the `deep_time` archetype to get pure temporal processing:
 
 ```bash
-python -m pipeline.flows.time_lab scrub input/clip.mp4 --intensity 0.7 --seed 42
-python -m pipeline.flows.time_lab echo input/clip.mp4 --delay 0.1 --trail 0.5
-python -m pipeline.flows.time_lab slit-scan input/clip.mp4 --axis vertical --seed 42
-python -m pipeline.flows.time_lab datamosh input/clip.mp4 --refresh-interval 99999 --seed 42
-python -m pipeline.flows.time_lab temporal-fft input/clip.mp4 --mode high_pass --cutoff 0.1
+python -m pipeline.flows.show_reel run -n 8 --archetype deep_time --src input/clip.mp4 --footage-ratio 1.0 --seed 42
+```
+
+Or use `cascade` for time effects mixed with shaders and/or crush:
+
+```bash
+python -m pipeline.flows.show_reel run -n 8 --archetype cascade --src input/clip.mp4 --footage-ratio 1.0 --seed 42
 ```

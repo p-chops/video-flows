@@ -100,15 +100,14 @@ python -m pipeline.flows.show_reel render work/reel_777_manifest.json
 
 ### Recipe system
 
-Processing is described by **recipes** — declarative structures that specify sources, steps, lane compositing, and post-processing. The procedural generator (`random_recipe()`) chooses from 5 structural archetypes along a spatial–temporal axis:
+Processing is described by **recipes** — declarative structures that specify sources, steps, lane compositing, and post-processing. The procedural generator (`random_recipe()`) chooses from 4 structural archetypes — three pure-domain poles plus a multi-domain mixer:
 
 | Archetype | Weight | Structure |
 |-----------|--------|-----------|
 | `deep_space` | 3.0 | Pure shader stack — hand-curated boutique stacks, no time effects |
-| `deep_time` | 2.0 | 5–8 stacked time effects, pure temporal destruction |
-| `spatial_cascade` | 1.5 | Shaders → time effects (spatial world animated temporally) |
-| `temporal_cascade` | 1.5 | Time effects → shaders (motion texture given visual identity) |
-| `codec_crush` | 0.5 | Multi-codec crush cascade (mpeg2 → mpeg4 → x264) |
+| `cascade` | 3.0 | 2–3 domains from {shaders, time, crush} in random order |
+| `deep_time` | 2.0 | 3–5 stacked time effects, pure temporal destruction |
+| `codec_crush` | 0.5 | Single crush pass → shader stack (rare, expensive) |
 
 Complexity (0.0–1.0) scales parameters within the chosen archetype.
 
@@ -132,16 +131,6 @@ python -m pipeline.flows.stooges input/footage.mp4 --n-channels 5 --seed 42
 
 # Warp chain — apply warp shaders to footage
 python -m pipeline.flows.brain_wipe warp-chain input/footage.mp4 --n-shaders 3 --seed 42
-```
-
-## Time effect lab
-
-Test individual time effects on a clip:
-
-```bash
-python -m pipeline.flows.time_lab scrub input/clip.mp4 --intensity 0.7 --seed 42
-python -m pipeline.flows.time_lab echo input/clip.mp4 --delay 0.1 --trail 0.8
-python -m pipeline.flows.time_lab drift input/clip.mp4 --loop-dur 2.0 --seed 42
 ```
 
 ## Python API
