@@ -271,6 +271,15 @@ def _add_pack_parsers(sub):
     p_pack = sub.add_parser("pack", help="Shader pack management")
     pack_sub = p_pack.add_subparsers(dest="pack_command")
 
+    p_list = pack_sub.add_parser("list", help="List installed packs")
+    p_list.add_argument("-v", "--verbose", action="store_true",
+                        help="Show stack names")
+
+    p_info = pack_sub.add_parser("info", help="Inspect a pack")
+    p_info.add_argument("name", help="Pack name")
+    p_info.add_argument("-v", "--verbose", action="store_true",
+                        help="Show stack shader chains and params")
+
     p_create = pack_sub.add_parser("create", help="Create pack from shader folder")
     p_create.add_argument("name", help="Pack name")
     p_create.add_argument("shader_source", type=Path,
@@ -288,11 +297,139 @@ def _add_pack_parsers(sub):
     p_pack.set_defaults(func=_handle_pack)
 
 
+def _discover_packs() -> list[Path]:
+    """Return sorted list of pack directories under packs/."""
+    packs_dir = Path(__file__).resolve().parent.parent / "packs"
+    if not packs_dir.is_dir():
+        return []
+    return sorted(d for d in packs_dir.iterdir()
+                  if d.is_dir() and (d / "shaders").is_dir())
+
+
+def _pack_summary(pack_dir: Path) -> dict:
+    """Load shader and stack info for a single pack."""
+    from pipeline.isf import load_shader_dir
+
+    shaders_dir = pack_dir / "shaders"
+    shaders = load_shader_dir(shaders_dir) if shaders_dir.is_dir() else {}
+
+    processors = {k: v for k, v in shaders.items() if v.image_inputs}
+    generators = {k: v for k, v in shaders.items() if not v.image_inputs}
+
+    stacks = []
+    stacks_file = pack_dir / "stacks.yaml"
+    if stacks_file.is_file():
+        import yaml
+        with open(stacks_file) as f:
+            data = yaml.safe_load(f) or {}
+        stacks_section = data.get("stacks", data)
+        if isinstance(stacks_section, dict):
+            for name, spec in stacks_section.items():
+                shader_names = spec.get("shaders", []) if isinstance(spec, dict) else []
+                params = spec.get("shader_params", {}) if isinstance(spec, dict) else {}
+                stacks.append((name, shader_names, params))
+
+    return {
+        "name": pack_dir.name,
+        "path": pack_dir,
+        "shaders": shaders,
+        "processors": processors,
+        "generators": generators,
+        "stacks": stacks,
+    }
+
+
+def _handle_pack_list(verbose: bool):
+    packs = _discover_packs()
+    if not packs:
+        print("No packs installed.")
+        return
+
+    # Compute column width for alignment
+    max_name = max(len(d.name) for d in packs)
+
+    for pack_dir in packs:
+        info = _pack_summary(pack_dir)
+        n_proc = len(info["processors"])
+        n_gen = len(info["generators"])
+        n_stacks = len(info["stacks"])
+        name = info["name"].ljust(max_name)
+        print(f"  {name}  {n_proc + n_gen:3d} shaders ({n_proc} proc, {n_gen} gen)"
+              f"   {n_stacks:2d} stacks")
+
+        if verbose and info["stacks"]:
+            names = [s[0] for s in info["stacks"]]
+            print(f"  {' ' * max_name}  {', '.join(names)}")
+
+
+def _handle_pack_info(name: str, verbose: bool):
+    packs_dir = Path(__file__).resolve().parent.parent / "packs"
+    pack_dir = packs_dir / name
+    if not pack_dir.is_dir():
+        print(f"Error: pack '{name}' not found in {packs_dir}")
+        sys.exit(1)
+
+    info = _pack_summary(pack_dir)
+    n_proc = len(info["processors"])
+    n_gen = len(info["generators"])
+    n_stacks = len(info["stacks"])
+
+    print(f"{name} — {n_proc + n_gen} shaders, {n_stacks} stacks\n")
+
+    # Group processors by first category
+    if info["processors"]:
+        print(f"Processors ({n_proc}):")
+        by_cat: dict[str, list[str]] = {}
+        for stem, shader in sorted(info["processors"].items()):
+            cat = shader.categories[0] if shader.categories else "Uncategorized"
+            by_cat.setdefault(cat, []).append(stem)
+        for cat in sorted(by_cat):
+            stems = sorted(by_cat[cat])
+            print(f"  {cat} ({len(stems)}): {', '.join(stems)}")
+
+    # Generators
+    if info["generators"]:
+        print(f"\nGenerators ({n_gen}):")
+        print(f"  {', '.join(sorted(info['generators']))}")
+
+    # Stacks
+    if info["stacks"]:
+        if n_stacks > 0:
+            avg = sum(len(s[1]) for s in info["stacks"]) / n_stacks
+            print(f"\nStacks ({n_stacks}, avg {avg:.1f} shaders):")
+        for sname, shader_names, params in info["stacks"]:
+            chain = " → ".join(shader_names)
+            if verbose:
+                print(f"  {sname}:")
+                print(f"    {chain}")
+                if params:
+                    for shader_stem, pspec in params.items():
+                        parts = []
+                        for pk, pv in pspec.items():
+                            if isinstance(pv, list) and len(pv) == 2:
+                                parts.append(f"{pk}=[{pv[0]}, {pv[1]}]")
+                            elif isinstance(pv, dict) and "choice" in pv:
+                                parts.append(f"{pk}={{choice: {pv['choice']}}}")
+                            else:
+                                parts.append(f"{pk}={pv}")
+                        print(f"    {shader_stem}: {', '.join(parts)}")
+            else:
+                print(f"  {sname} ({len(shader_names)}): {chain}")
+
+
 def _handle_pack(args):
     cmd = getattr(args, "pack_command", None)
     if not cmd:
-        print("Usage: vf pack {create,stacks}")
+        print("Usage: vf pack {list,info,create,stacks}")
         sys.exit(1)
+
+    if cmd == "list":
+        _handle_pack_list(verbose=args.verbose)
+        return
+
+    if cmd == "info":
+        _handle_pack_info(args.name, verbose=args.verbose)
+        return
 
     if cmd == "create":
         from scripts.create_pack import create_pack
