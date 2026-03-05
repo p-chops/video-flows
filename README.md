@@ -4,8 +4,17 @@ Automated video processing pipeline for dense, textural, otherworldly visuals. T
 
 ## Getting started
 
+Download the release zip or clone the repository. Then, in that directory, create and activate a Python virtual environment:
+
 ```bash
-pip install -e .
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Now install and test:
+
+```bash
+pip install .
 
 # Generate a show reel — works immediately, no source footage needed
 vf reel -n 8 --seed 42
