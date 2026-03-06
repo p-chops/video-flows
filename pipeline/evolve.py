@@ -50,22 +50,22 @@ class Genome:
 
 @dataclass
 class VisualFeatures:
-    """Extended feature set for GA fitness evaluation."""
+    """Feature set for GA fitness evaluation — balanced spatial + temporal."""
     brightness: float           # mean luma [0, 1]
     contrast: float             # p95 − p5 luma [0, 1]
     spatial_entropy: float      # Laplacian variance, normalized
-    color_diversity: float      # hue histogram spread
-    channel_decorrelation: float  # 1 − mean pairwise R/G/B correlation
-    edge_density: float         # fraction of Canny edge pixels
-    saturation_mean: float      # mean HSV saturation [0, 1]
-    frequency_balance: float    # high-freq / total FFT energy
+    color_coherence: float      # hue palette peakedness [0, 1]
+    mid_frequency_ratio: float  # mid-band FFT energy (not noise, not flat)
+    spatial_autocorrelation: float  # structural vs noise (smooth decay = structure)
+    spectral_flatness: float    # geo_mean/arith_mean of spectrum (1=organic, 0=periodic)
     frame_variance: float       # variance across evaluated frames
-    dynamic_range: float        # (max − min) / 255
+    temporal_smoothness: float  # motion consistency (1 − CV of diffs)
+    motion_magnitude: float     # mean frame-to-frame pixel change [0, 1]
 
     FEATURE_NAMES: ClassVar[list[str]] = [
-        "brightness", "contrast", "spatial_entropy", "color_diversity",
-        "channel_decorrelation", "edge_density", "saturation_mean",
-        "frequency_balance", "frame_variance", "dynamic_range",
+        "brightness", "contrast", "spatial_entropy", "color_coherence",
+        "mid_frequency_ratio", "spatial_autocorrelation", "spectral_flatness",
+        "frame_variance", "temporal_smoothness", "motion_magnitude",
     ]
 
     def to_array(self) -> np.ndarray:
@@ -96,16 +96,16 @@ class EvolutionConfig:
 # ─── Fitness weights ──────────────────────────────────────────────────────────
 
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "brightness": 0.0,
-    "contrast": 1.5,
-    "spatial_entropy": 2.0,
-    "color_diversity": 1.0,
-    "channel_decorrelation": 0.8,
-    "edge_density": 1.0,
-    "saturation_mean": 0.5,
-    "frequency_balance": 0.8,
-    "frame_variance": 1.2,
-    "dynamic_range": 0.8,
+    "brightness": 0.0,          # penalty only
+    "contrast": 1.2,
+    "spatial_entropy": 1.5,
+    "color_coherence": 1.0,
+    "mid_frequency_ratio": 1.2,
+    "spatial_autocorrelation": 1.2,
+    "spectral_flatness": 0.0,   # multiplicative penalty, not additive
+    "frame_variance": 2.0,
+    "temporal_smoothness": 1.5,
+    "motion_magnitude": 3.0,    # highest weight — motion is king
 }
 
 _BRIGHTNESS_PENALTY_DARK = 0.08
@@ -121,8 +121,13 @@ def generate_source_frames(
     n_frames: int = 5,
     fps: float = 30.0,
     seed: int = 0,
+    time_spread: float = 4.0,
 ) -> list[np.ndarray]:
-    """Render N frames from a generator shader. All in-memory, no file I/O."""
+    """Render N frames from a generator shader. All in-memory, no file I/O.
+
+    Frames are spread across `time_spread` seconds to catch temporal
+    divergence (e.g. brightness blowout from feedback accumulation).
+    """
     try:
         prog = gl.compile(generator.glsl_source)
     except Exception:
@@ -133,8 +138,12 @@ def generate_source_frames(
     params = generator.default_params()
     fbo_a, fbo_b = gl.fbo_pair(w, h)
 
+    # Spread eval frames across time_spread seconds
+    frame_indices = [round(i * time_spread * fps / max(1, n_frames - 1))
+                     for i in range(n_frames)] if n_frames > 1 else [0]
+
     frames = []
-    for i in range(n_frames):
+    for i in frame_indices:
         elapsed = i / fps
         fbo_a.fbo.use()
 
@@ -157,13 +166,19 @@ def generate_source_frames(
     fbo_a.release()
     fbo_b.release()
     prog.release()
-    return frames
+    return frames, frame_indices
 
 
-def _noise_frames(seed: int, w: int, h: int, n: int) -> list[np.ndarray]:
+def _noise_frames(
+    seed: int, w: int, h: int, n: int,
+    time_spread: float = 4.0, fps: float = 30.0,
+) -> tuple[list[np.ndarray], list[int]]:
     """Generate random noise frames as fallback source."""
     rng = np.random.RandomState(seed)
-    return [rng.randint(0, 256, (h, w, 3), dtype=np.uint8) for _ in range(n)]
+    frames = [rng.randint(0, 256, (h, w, 3), dtype=np.uint8) for _ in range(n)]
+    indices = [round(i * time_spread * fps / max(1, n - 1))
+               for i in range(n)] if n > 1 else [0]
+    return frames, indices
 
 
 def apply_stack_to_frames(
@@ -173,11 +188,13 @@ def apply_stack_to_frames(
     param_overrides: dict[str, dict[str, Any]],
     w: int, h: int,
     fps: float = 30.0,
+    frame_indices: list[int] | None = None,
 ) -> list[np.ndarray]:
     """Apply a shader stack to in-memory frames. No file I/O.
 
     Mirrors _apply_shader_stack logic from shader.py but operates on
-    numpy arrays instead of ffmpeg streams.
+    numpy arrays instead of ffmpeg streams. If frame_indices is provided,
+    uses those for elapsed time calculation (for time-spread evaluation).
     """
     overrides = param_overrides or {}
 
@@ -209,8 +226,9 @@ def apply_stack_to_frames(
     fbo_a, fbo_b = gl.fbo_pair(w, h)
     input_tex = gl.texture(w, h)
 
+    indices = frame_indices if frame_indices is not None else list(range(len(frames)))
     output_frames = []
-    for frame_idx, frame in enumerate(frames):
+    for frame_idx, frame in zip(indices, frames):
         elapsed = frame_idx / fps
 
         input_tex.write(np.flipud(frame).tobytes())
@@ -327,17 +345,17 @@ class _PersistentBuffer:
 def extract_features(frames: list[np.ndarray]) -> VisualFeatures:
     """Compute visual features from a list of numpy frames."""
     if not frames:
-        return VisualFeatures(*(0.0,) * 10)
+        return VisualFeatures(*(0.0,) * len(VisualFeatures.FEATURE_NAMES))
 
     brightnesses = []
     contrasts = []
     entropies = []
-    edge_densities = []
-    saturations = []
-    freq_balances = []
-    color_diversities = []
-    channel_decorrs = []
-    dynamic_ranges = []
+    mid_freq_ratios = []
+    color_coherences = []
+    autocorrelations = []
+    spectral_flatnesses = []
+    frame_diffs = []
+    prev_gray = None
 
     for frame in frames:
         gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
@@ -354,58 +372,123 @@ def extract_features(frames: list[np.ndarray]) -> VisualFeatures:
         lap = cv2.Laplacian(gray, cv2.CV_64F)
         entropies.append(min(lap.var() / 2000.0, 1.0))
 
-        # Edge density
-        edges = cv2.Canny(gray, 50, 150)
-        edge_densities.append(np.count_nonzero(edges) / edges.size)
-
-        # Saturation
-        saturations.append(hsv[:, :, 1].mean() / 255.0)
-
-        # Color diversity (std of hue histogram)
+        # Color coherence (palette peakedness — fewer dominant hues = better)
         hue_hist = cv2.calcHist([hsv], [0], None, [36], [0, 180]).flatten()
         hue_hist = hue_hist / (hue_hist.sum() + 1e-10)
-        color_diversities.append(float(hue_hist.std()))
+        top3 = np.sort(hue_hist)[-3:].sum()
+        color_coherences.append(float(top3))
 
-        # Channel decorrelation
-        r, g, b = frame[:, :, 0].flatten().astype(float), \
-                  frame[:, :, 1].flatten().astype(float), \
-                  frame[:, :, 2].flatten().astype(float)
-        corr_rg = abs(np.corrcoef(r, g)[0, 1]) if r.std() > 0 and g.std() > 0 else 1.0
-        corr_rb = abs(np.corrcoef(r, b)[0, 1]) if r.std() > 0 and b.std() > 0 else 1.0
-        corr_gb = abs(np.corrcoef(g, b)[0, 1]) if g.std() > 0 and b.std() > 0 else 1.0
-        channel_decorrs.append(1.0 - (corr_rg + corr_rb + corr_gb) / 3.0)
+        # Frame-to-frame diff (used for motion_magnitude + temporal_smoothness)
+        if prev_gray is not None:
+            diff = np.abs(gray.astype(float) - prev_gray.astype(float)).mean()
+            frame_diffs.append(diff)
+        prev_gray = gray
 
-        # Frequency balance (high-freq energy / total)
-        f = np.fft.fft2(gray.astype(float))
+        # Mid-frequency ratio (3-band FFT: low / mid / high)
+        gf = gray.astype(float)
+        f = np.fft.fft2(gf)
         fshift = np.fft.fftshift(f)
         mag = np.abs(fshift)
         cy, cx = mag.shape[0] // 2, mag.shape[1] // 2
-        radius = min(cy, cx) // 4
+        max_r = min(cy, cx)
+        r_low = max_r // 6
+        r_mid = max_r // 2
         total = mag.sum() + 1e-10
-        low_mask = np.zeros_like(mag, dtype=bool)
         y, x = np.ogrid[:mag.shape[0], :mag.shape[1]]
-        low_mask[(y - cy)**2 + (x - cx)**2 <= radius**2] = True
-        high_energy = mag[~low_mask].sum()
-        freq_balances.append(float(high_energy / total))
+        dist_sq = (y - cy)**2 + (x - cx)**2
+        mid_mask = (dist_sq > r_low**2) & (dist_sq <= r_mid**2)
+        mid_energy = mag[mid_mask].sum()
+        mid_freq_ratios.append(float(mid_energy / total))
 
-        # Dynamic range
-        dynamic_ranges.append((float(gray.max()) - float(gray.min())) / 255.0)
+        # Spectral flatness — combination of Wiener entropy and peak-to-median
+        # ratio. Wiener alone misses "soft periodic" patterns (halftone with
+        # neighbor sampling). Peak-to-median catches any concentrated spectral
+        # energy. Combined: both must be organic for full credit.
+        mag_nz = mag[mag > 0].flatten()
+        if len(mag_nz) > 0:
+            # Wiener entropy: geometric_mean / arithmetic_mean
+            log_mean = np.mean(np.log(mag_nz + 1e-10))
+            geo_mean = np.exp(log_mean)
+            arith_mean = np.mean(mag_nz)
+            wiener = geo_mean / (arith_mean + 1e-10)
+            # Peak-to-median: how much the strongest peaks exceed the median.
+            # Exclude DC (center pixel). Subsample for speed.
+            mag_no_dc = mag.copy()
+            mag_no_dc[cy, cx] = 0
+            mag_flat = mag_no_dc[mag_no_dc > 0].flatten()
+            if len(mag_flat) > 10000:
+                mag_flat = mag_flat[::len(mag_flat) // 10000]
+            if len(mag_flat) > 0:
+                median_mag = float(np.median(mag_flat))
+                top_k = max(1, len(mag_flat) // 200)  # top 0.5%
+                top_vals = np.partition(mag_flat, -top_k)[-top_k:]
+                peak_ratio = float(np.mean(top_vals) / (median_mag + 1e-10))
+                # Normalize: peak_ratio of 5 = organic, 50+ = periodic grid
+                # Map to [0, 1]: 1.0 at ratio ≤ 5, 0.0 at ratio ≥ 40
+                peak_score = float(np.clip(1.0 - (peak_ratio - 5.0) / 35.0, 0.0, 1.0))
+            else:
+                peak_score = 0.0
+            # Combine: geometric mean so both must be high
+            sf = float(min(1.0, (wiener * peak_score) ** 0.5))
+            spectral_flatnesses.append(sf)
+        else:
+            spectral_flatnesses.append(0.0)
+
+        # Spatial autocorrelation (structure vs noise)
+        gf_norm = gf - gf.mean()
+        var = (gf_norm * gf_norm).mean()
+        if var > 1e-6:
+            autocorrs = []
+            for offset in (4, 8, 16):
+                if offset < gf.shape[1] - 1:
+                    corr_h = (gf_norm[:, :-offset] * gf_norm[:, offset:]).mean() / var
+                    corr_v = (gf_norm[:-offset, :] * gf_norm[offset:, :]).mean() / var
+                    autocorrs.append((corr_h + corr_v) / 2.0)
+            if len(autocorrs) >= 2:
+                mean_ac = sum(max(0, a) for a in autocorrs) / len(autocorrs)
+                decay_ok = all(autocorrs[i] >= autocorrs[i+1] - 0.05
+                               for i in range(len(autocorrs) - 1))
+                ac_score = mean_ac * (1.0 if decay_ok else 0.5)
+            else:
+                ac_score = 0.0
+        else:
+            ac_score = 0.0
+        autocorrelations.append(float(max(0.0, min(1.0, ac_score))))
 
     # Frame variance (temporal interest)
     frame_means = np.array(brightnesses)
     frame_var = float(frame_means.var()) if len(frame_means) > 1 else 0.0
 
+    # Motion magnitude: mean frame-to-frame pixel change, normalized to [0, 1]
+    if frame_diffs:
+        motion_mag = float(np.mean(frame_diffs) / 255.0)
+    else:
+        motion_mag = 0.0
+
+    # Temporal smoothness: 1 − coefficient of variation of frame diffs
+    # Low CV = consistent motion (good), high CV = flickery (bad)
+    if len(frame_diffs) >= 2:
+        diffs_arr = np.array(frame_diffs)
+        mean_diff = diffs_arr.mean()
+        if mean_diff > 0.1:  # has meaningful motion
+            cv = diffs_arr.std() / mean_diff
+            temporal_smooth = float(max(0.0, min(1.0, 1.0 - cv)))
+        else:
+            temporal_smooth = 0.0  # static — no smoothness credit
+    else:
+        temporal_smooth = 0.0
+
     return VisualFeatures(
         brightness=float(np.mean(brightnesses)),
         contrast=float(np.mean(contrasts)),
         spatial_entropy=float(np.mean(entropies)),
-        color_diversity=float(np.mean(color_diversities)),
-        channel_decorrelation=float(np.mean(channel_decorrs)),
-        edge_density=float(np.mean(edge_densities)),
-        saturation_mean=float(np.mean(saturations)),
-        frequency_balance=float(np.mean(freq_balances)),
+        color_coherence=float(np.mean(color_coherences)),
+        mid_frequency_ratio=float(np.mean(mid_freq_ratios)),
+        spatial_autocorrelation=float(np.mean(autocorrelations)),
+        spectral_flatness=float(np.mean(spectral_flatnesses)),
         frame_variance=frame_var,
-        dynamic_range=float(np.mean(dynamic_ranges)),
+        temporal_smoothness=temporal_smooth,
+        motion_magnitude=motion_mag,
     )
 
 
@@ -430,7 +513,60 @@ def compute_fitness(
     if features.contrast < 0.02:
         score *= 0.05
 
+    # Nonlinear entropy penalty: penalize both boring (< 0.1) and chaotic (> 0.85)
+    e = features.spatial_entropy
+    if e < 0.1:
+        score *= 0.2 + 0.8 * (e / 0.1)   # ramp 0.2 → 1.0
+    elif e > 0.85:
+        score *= max(0.2, 1.0 - (e - 0.85) / 0.15)  # ramp 1.0 → 0.2
+
+    # Spectral flatness as multiplicative penalty — periodic grids get crushed.
+    # flatness < 0.3 → 0.1×, flatness 0.3–0.6 → ramp to 1.0×, above 0.6 → no penalty
+    sf = features.spectral_flatness
+    if sf < 0.3:
+        score *= 0.1
+    elif sf < 0.6:
+        score *= 0.1 + 0.9 * ((sf - 0.3) / 0.3)
+
+    # Motion floor — stacks that don't move get crushed regardless of spatial beauty
+    # motion < 0.005 → 0.1×, motion 0.005–0.02 → ramp to 1.0×
+    m = features.motion_magnitude
+    if m < 0.005:
+        score *= 0.1
+    elif m < 0.02:
+        score *= 0.1 + 0.9 * ((m - 0.005) / 0.015)
+
     return score
+
+
+def _shader_similarity(a: Genome, b: Genome) -> float:
+    """Fraction of shared shader stems between two genomes (Jaccard)."""
+    set_a = set(g.shader_stem for g in a.genes)
+    set_b = set(g.shader_stem for g in b.genes)
+    if not set_a and not set_b:
+        return 1.0
+    return len(set_a & set_b) / len(set_a | set_b)
+
+
+def apply_fitness_sharing(
+    population: list[Genome],
+    similarity_threshold: float = 0.6,
+    sharing_strength: float = 0.3,
+) -> None:
+    """Light niche penalty to maintain population diversity.
+
+    Genomes similar (Jaccard > threshold) to fitter ones get fitness
+    reduced. Gentle enough to let fitness features drive selection —
+    diversity should come from good features, not population penalties.
+    """
+    ranked = sorted(population, key=lambda g: g.fitness, reverse=True)
+    for i, genome in enumerate(ranked):
+        niche_count = 0
+        for j in range(i):  # only compare to fitter genomes
+            if _shader_similarity(genome, ranked[j]) > similarity_threshold:
+                niche_count += 1
+        if niche_count > 0:
+            genome.fitness /= (1.0 + sharing_strength * niche_count)
 
 
 # ─── Genome construction ─────────────────────────────────────────────────────
@@ -504,6 +640,7 @@ def evaluate_genome(
     source_frames: list[np.ndarray],
     w: int, h: int,
     weights: dict[str, float],
+    frame_indices: list[int] | None = None,
 ) -> float:
     """Evaluate a genome: apply stack, extract features, compute fitness."""
     try:
@@ -511,6 +648,7 @@ def evaluate_genome(
         param_overrides = {g.shader_stem: g.params for g in genome.genes}
         output_frames = apply_stack_to_frames(
             gl, source_frames, shaders, param_overrides, w, h,
+            frame_indices=frame_indices,
         )
         features = extract_features(output_frames)
         genome.features = features.to_dict()
@@ -678,14 +816,15 @@ def evolve(
 
     try:
         # Generate source frames from a random generator
+        # Frames are spread across 4 seconds to catch temporal divergence
         if generators:
             gen_shader = rng.choice(generators)
-            source_frames = generate_source_frames(
+            source_frames, frame_indices = generate_source_frames(
                 gl, gen_shader, config.eval_width, config.eval_height,
                 n_frames=config.eval_frames, seed=config.seed,
             )
         else:
-            source_frames = _noise_frames(
+            source_frames, frame_indices = _noise_frames(
                 config.seed, config.eval_width, config.eval_height,
                 config.eval_frames,
             )
@@ -699,7 +838,9 @@ def evolve(
         # Evaluate initial population
         for genome in population:
             evaluate_genome(gl, genome, source_frames,
-                            config.eval_width, config.eval_height, config.weights)
+                            config.eval_width, config.eval_height, config.weights,
+                            frame_indices=frame_indices)
+        apply_fitness_sharing(population)
 
         for gen in range(config.generations):
             population.sort(key=lambda g: g.fitness, reverse=True)
@@ -723,12 +864,16 @@ def evolve(
             # Evaluate new individuals (skip elites)
             for genome in next_gen[config.elite_count:]:
                 evaluate_genome(gl, genome, source_frames,
-                                config.eval_width, config.eval_height, config.weights)
+                                config.eval_width, config.eval_height, config.weights,
+                                frame_indices=frame_indices)
+
+            # Fitness sharing: penalize crowded niches
+            apply_fitness_sharing(next_gen)
 
             # Rotate source frames every 5 generations
             if gen % 5 == 4 and generators:
                 gen_shader = rng.choice(generators)
-                source_frames = generate_source_frames(
+                source_frames, frame_indices = generate_source_frames(
                     gl, gen_shader, config.eval_width, config.eval_height,
                     n_frames=config.eval_frames, seed=config.seed + gen,
                 )
