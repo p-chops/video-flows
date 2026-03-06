@@ -20,7 +20,7 @@ dependencies = [
 vf = "pipeline.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["pipeline*"]
+include = ["pipeline*", "scripts*"]
 
 [project.optional-dependencies]
 dev = [

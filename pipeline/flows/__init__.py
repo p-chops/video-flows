@@ -11,6 +11,7 @@ def __getattr__(name):
         "warp_chain": (".brain_wipe", "warp_chain"),
         "brain_wipe_render": (".brain_wipe", "brain_wipe_render"),
         "stooges_channels": (".stooges", "stooges_channels"),
+        "evolve_stacks": (".evolve_stacks", "evolve_stacks"),
     }
     if name in _exports:
         mod_name, attr = _exports[name]

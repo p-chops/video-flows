@@ -377,6 +377,17 @@ def _add_pack_parsers(sub):
     p_stacks.add_argument("--seed", type=int, default=42)
     p_stacks.add_argument("-o", "--output", type=Path, default=None)
 
+    p_evolve = pack_sub.add_parser("evolve",
+                                    help="Evolve stacks via genetic algorithm")
+    p_evolve.add_argument("pack_dir", type=Path,
+                           help="Pack directory (e.g., packs/my_effects/)")
+    p_evolve.add_argument("--generations", type=int, default=20)
+    p_evolve.add_argument("--population", type=int, default=50)
+    p_evolve.add_argument("-n", "--n-stacks", type=int, default=None,
+                           help="Number of stacks to output (default: auto)")
+    p_evolve.add_argument("--seed", type=int, default=42)
+    p_evolve.add_argument("-o", "--output", type=Path, default=None)
+
     p_pack.set_defaults(func=_handle_pack)
 
 
@@ -503,7 +514,7 @@ def _handle_pack_info(name: str, verbose: bool):
 def _handle_pack(args):
     cmd = getattr(args, "pack_command", None)
     if not cmd:
-        print("Usage: vf pack {list,info,create,stacks}")
+        print("Usage: vf pack {list,info,create,stacks,evolve}")
         sys.exit(1)
 
     if cmd == "list":
@@ -554,6 +565,21 @@ def _handle_pack(args):
             failures=failures,
         )
         print(f"Wrote {len(stacks)} stacks to {out_path}")
+
+    elif cmd == "evolve":
+        from pipeline.flows.evolve_stacks import evolve_stacks
+        pack_dir = args.pack_dir.resolve()
+        if not (pack_dir / "shaders").is_dir():
+            print(f"Error: {pack_dir / 'shaders'} not found")
+            sys.exit(1)
+        evolve_stacks(
+            pack_dir=pack_dir,
+            generations=args.generations,
+            population_size=args.population,
+            n_output=args.n_stacks,
+            seed=args.seed,
+            output=args.output,
+        )
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
