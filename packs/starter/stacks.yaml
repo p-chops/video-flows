@@ -1,148 +1,161 @@
+# Auto-generated shader stacks
+# 7 stacks from 8 processor shaders
+# 6 generator shaders available (not included in stacks)
+#
+# Parameter resolution:
+#   scalar       → used as-is
+#   [min, max]   → rng.uniform(min, max)
+#   {choice: []} → rng.choice(list)
 stacks:
-  starter_glow:
-    shaders: [starter_glow]
-    shader_params:
-      starter_glow:
-        glow_strength: [0.3, 0.8]
-        hue: [0.0, 1.0]
-
-  mosaic_glow:
-    shaders: [starter_mosaic, starter_glow]
+  shadow_fade:
+    shaders:
+    - starter_mosaic
+    - starter_scanline
+    - starter_glow
+    - starter_glow
+    - starter_glow
     shader_params:
       starter_mosaic:
-        block_size: [0.01, 0.04]
-        color_levels: {choice: [4, 6, 8, 12]}
-      starter_glow:
-        glow_strength: [0.4, 0.9]
-        hue: [0.0, 1.0]
-
-  split_invert:
-    shaders: [starter_shift, starter_invert_luma]
-    shader_params:
-      starter_shift:
-        amount: [0.005, 0.03]
-        angle: [0.0, 6.28]
-      starter_invert_luma:
-        mix_amount: [0.5, 1.0]
-        threshold: [0.2, 0.6]
-
-  chunky_shift:
-    shaders: [starter_mosaic, starter_shift]
-    shader_params:
-      starter_mosaic:
-        block_size: [0.02, 0.06]
-        color_levels: {choice: [3, 4, 5, 6]}
-      starter_shift:
-        amount: [0.01, 0.04]
-        angle: [0.0, 6.28]
-
-  glow_invert:
-    shaders: [starter_glow, starter_invert_luma, starter_shift]
-    shader_params:
-      starter_glow:
-        glow_strength: [0.5, 1.0]
-        hue: [0.0, 1.0]
-      starter_invert_luma:
-        mix_amount: [0.3, 0.8]
-        threshold: [0.3, 0.7]
-      starter_shift:
-        amount: [0.003, 0.015]
-        angle: [0.0, 6.28]
-
-  # --- New stacks using new shaders ---
-
-  warped_duotone:
-    shaders: [starter_warp, starter_duotone]
-    shader_params:
-      starter_warp:
-        amplitude: [0.02, 0.08]
-        frequency: [3.0, 10.0]
-        layers: {choice: [2, 3, 4]}
-      starter_duotone:
-        shadow_hue: [0.5, 0.75]
-        highlight_hue: [0.0, 0.2]
-        contrast: [1.0, 2.0]
-        saturation: [0.5, 0.9]
-
-  kaleido_glow:
-    shaders: [starter_kaleido, starter_glow]
-    shader_params:
-      starter_kaleido:
-        segments: {choice: [4, 6, 8, 12]}
-        zoom: [0.8, 2.0]
-        spin: [0.05, 0.4]
-      starter_glow:
-        glow_strength: [0.4, 0.9]
-        hue: [0.0, 1.0]
-
-  crt_mosaic:
-    shaders: [starter_mosaic, starter_scanline]
-    shader_params:
-      starter_mosaic:
-        block_size: [0.008, 0.03]
-        color_levels: {choice: [4, 6, 8]}
+        block_size: [0.0062, 0.0287]
+        color_levels: [5.5113, 9.7113]
       starter_scanline:
-        line_count: [150.0, 400.0]
-        line_darkness: [0.2, 0.5]
-        barrel: [0.05, 0.25]
-        phosphor: [0.2, 0.6]
-
-  liquid_kaleido:
-    shaders: [starter_warp, starter_kaleido, starter_shift]
-    shader_params:
-      starter_warp:
-        amplitude: [0.03, 0.10]
-        frequency: [2.0, 6.0]
-        speed: [0.3, 0.8]
-        layers: {choice: [3, 4, 5]}
-      starter_kaleido:
-        segments: {choice: [3, 5, 6, 8]}
-        zoom: [0.7, 1.5]
-        spin: [0.1, 0.5]
-      starter_shift:
-        amount: [0.005, 0.02]
-        angle: [0.0, 6.28]
-
-  duotone_scanline:
-    shaders: [starter_duotone, starter_scanline, starter_shift]
-    shader_params:
-      starter_duotone:
-        shadow_hue: [0.0, 1.0]
-        highlight_hue: [0.0, 1.0]
-        contrast: [1.2, 2.5]
-        saturation: [0.6, 1.0]
-      starter_scanline:
-        line_count: [200.0, 500.0]
-        line_darkness: [0.3, 0.6]
-        barrel: [0.1, 0.3]
-        phosphor: [0.3, 0.7]
-        roll_speed: [0.0, 0.3]
-      starter_shift:
-        amount: [0.003, 0.012]
-        angle: [0.0, 6.28]
-
-  deep_warp:
-    shaders: [starter_warp, starter_invert_luma, starter_warp]
-    shader_params:
-      starter_warp:
-        amplitude: [0.02, 0.06]
-        frequency: [4.0, 12.0]
-        layers: {choice: [2, 3, 4]}
-      starter_invert_luma:
-        mix_amount: [0.3, 0.7]
-        threshold: [0.3, 0.6]
-
-  tunnel_warp:
-    shaders: [starter_kaleido, starter_warp, starter_glow]
-    shader_params:
-      starter_kaleido:
-        segments: {choice: [3, 4, 6]}
-        zoom: [1.0, 2.5]
-        spin: [0.15, 0.6]
-      starter_warp:
-        amplitude: [0.01, 0.04]
-        frequency: [3.0, 8.0]
-        layers: {choice: [2, 3]}
+        line_count: [165.8246, 321.8246]
+        line_darkness: [0.5011, 0.7411]
+        barrel: [0.0835, 0.2335]
+        phosphor: [0.2328, 0.5328]
+        roll_speed: [0.0, 0.4466]
       starter_glow:
-        glow_strength: [0.5, 1.0]
-        hue: [0.0, 1.0]
+        glow_strength: [0.4819, 0.7819]
+        hue: [0.2377, 0.5377]
+        brightness: [0.85, 1.15]
+  burnt_prism:
+    shaders:
+    - starter_shift
+    - starter_scanline
+    - starter_glow
+    - starter_glow
+    - starter_glow
+    shader_params:
+      starter_shift:
+        amount: [0.0, 0.0088]
+        angle: [0.0, 1.7464]
+      starter_scanline:
+        line_count: [163.0987, 319.0987]
+        line_darkness: [0.5049, 0.7449]
+        barrel: [0.1089, 0.2589]
+        phosphor: [0.2081, 0.5081]
+        roll_speed: [0.0, 0.4125]
+      starter_glow:
+        glow_strength: [0.4767, 0.7767]
+        hue: [0.2363, 0.5363]
+        brightness: [0.85, 1.15]
+  frozen_mesh:
+    shaders:
+    - starter_kaleido
+    - starter_scanline
+    - starter_glow
+    - starter_glow
+    - starter_glow
+    shader_params:
+      starter_kaleido:
+        segments: [2.0, 4.8396]
+        spin: [0.0, 0.1574]
+        zoom: [0.5, 1.1465]
+      starter_scanline:
+        line_count: [162.138, 318.138]
+        line_darkness: [0.7118, 0.8]
+        barrel: [0.1124, 0.2624]
+        phosphor: [0.2055, 0.5055]
+        roll_speed: [0.0, 0.4066]
+      starter_glow:
+        glow_strength: [0.406, 0.706]
+        hue: [0.1366, 0.4366]
+        brightness: [0.85, 1.15]
+  distant_edge:
+    shaders:
+    - starter_mosaic
+    - starter_scanline
+    - starter_glow
+    - starter_glow
+    shader_params:
+      starter_mosaic:
+        block_size: [0.0061, 0.0286]
+        color_levels: [5.5113, 9.7113]
+      starter_scanline:
+        line_count: [163.6364, 319.6364]
+        line_darkness: [0.4841, 0.7241]
+        barrel: [0.1024, 0.2524]
+        phosphor: [0.217, 0.517]
+        roll_speed: [0.0, 0.4135]
+      starter_glow:
+        glow_strength: [0.4603, 0.7603]
+        hue: [0.1988, 0.4988]
+        brightness: [0.85, 1.15]
+  signal_drain:
+    shaders:
+    - starter_kaleido
+    - starter_warp
+    - starter_scanline
+    - starter_glow
+    - starter_glow
+    shader_params:
+      starter_kaleido:
+        segments: [2.0, 4.8396]
+        spin: [0.0, 0.1574]
+        zoom: [0.5, 1.1465]
+      starter_warp:
+        amplitude: [0.0191, 0.0641]
+        frequency: [6.4663, 12.1663]
+        speed: [0.4094, 0.9944]
+        layers: [2.2554, 3.7554]
+      starter_scanline:
+        line_count: [156.896, 312.896]
+        line_darkness: [0.4921, 0.7321]
+        barrel: [0.1392, 0.2892]
+        phosphor: [0.2074, 0.5074]
+        roll_speed: [0.0, 0.4037]
+      starter_glow:
+        glow_strength: [0.4716, 0.7716]
+        hue: [0.1237, 0.4237]
+        brightness: [0.85, 1.15]
+  rich_tomb:
+    shaders:
+    - starter_shift
+    - starter_scanline
+    - starter_glow
+    - starter_glow
+    shader_params:
+      starter_shift:
+        amount: [0.0, 0.0088]
+        angle: [0.0, 1.7464]
+      starter_scanline:
+        line_count: [162.3616, 318.3616]
+        line_darkness: [0.5042, 0.7442]
+        barrel: [0.1009, 0.2509]
+        phosphor: [0.2233, 0.5233]
+        roll_speed: [0.0, 0.4405]
+      starter_glow:
+        glow_strength: [0.4615, 0.7615]
+        hue: [0.1646, 0.4646]
+        brightness: [0.85, 1.15]
+  cold_burn:
+    shaders:
+    - starter_glow
+    - starter_scanline
+    - starter_mosaic
+    - starter_glow
+    - starter_glow
+    shader_params:
+      starter_glow:
+        glow_strength: [0.4622, 0.7622]
+        hue: [0.1652, 0.4652]
+        brightness: [0.85, 1.15]
+      starter_scanline:
+        line_count: [165.7586, 321.7586]
+        line_darkness: [0.5017, 0.7417]
+        barrel: [0.0863, 0.2363]
+        phosphor: [0.2305, 0.5305]
+        roll_speed: [0.0, 0.4404]
+      starter_mosaic:
+        block_size: [0.006, 0.0285]
+        color_levels: [5.5113, 9.7113]
