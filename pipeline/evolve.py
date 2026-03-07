@@ -782,8 +782,11 @@ def _greedy_diverse_select(
 ) -> list[Genome]:
     """Greedily select n candidates maximizing fitness + diversity.
 
-    Each pick maximizes: fitness + λ * min_distance_to_any_selected
-    where distance is Euclidean in normalized feature space.
+    Each pick maximizes: fitness + λ * combined_distance
+    where combined_distance blends feature-space distance (Euclidean in
+    normalized 10-feature space) with shader-set distance (1 − Jaccard
+    similarity). This prevents the same dominant shaders from appearing
+    in every selected stack.
     """
     if not candidates:
         return []
@@ -810,6 +813,9 @@ def _greedy_diverse_select(
     else:
         norm_fit = np.ones_like(fitnesses)
 
+    # Pre-compute shader stem sets for Jaccard distance
+    shader_sets = [set(g.shader_stem for g in c.genes) for c in candidates]
+
     selected_indices: list[int] = []
     # Start with highest fitness
     selected_indices.append(int(np.argmax(fitnesses)))
@@ -822,12 +828,19 @@ def _greedy_diverse_select(
             if i in selected_indices:
                 continue
 
-            # Min distance to any already selected
-            min_dist = min(
+            # Min feature-space distance to any already selected
+            min_feat_dist = min(
                 float(np.linalg.norm(normed[i] - normed[j]))
                 for j in selected_indices
             )
-            score = norm_fit[i] + diversity_weight * min_dist
+            # Min shader-set distance (1 − Jaccard) to any already selected
+            min_shader_dist = min(
+                _jaccard_distance(shader_sets[i], shader_sets[j])
+                for j in selected_indices
+            )
+            # Blend: equal weight to feature diversity and shader diversity
+            combined_dist = 0.5 * min_feat_dist + 0.5 * min_shader_dist
+            score = norm_fit[i] + diversity_weight * combined_dist
             if score > best_score:
                 best_score = score
                 best_idx = i
@@ -836,6 +849,13 @@ def _greedy_diverse_select(
             selected_indices.append(best_idx)
 
     return [candidates[i] for i in selected_indices]
+
+
+def _jaccard_distance(a: set, b: set) -> float:
+    """1 − Jaccard similarity. Returns 1.0 for disjoint sets, 0.0 for identical."""
+    if not a and not b:
+        return 0.0
+    return 1.0 - len(a & b) / len(a | b)
 
 
 # ─── Output conversion ───────────────────────────────────────────────────────
