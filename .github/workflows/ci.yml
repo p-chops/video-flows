@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  install-and-verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: pip install .
+
+      - name: Verify vf command exists
+        run: vf --help
+
+      - name: Verify subcommands
+        run: |
+          vf reel --help
+          vf show --help
+          vf stack --help
+          vf pack --help
+
+      - name: Verify pack list runs
+        run: vf pack list
+
+      - name: Verify pack info runs
+        run: vf pack info starter
+
+      - name: Verify Python imports
+        run: |
+          python -c "from pipeline.config import Config; print('config ok')"
+          python -c "from pipeline.recipe import random_recipe; print('recipe ok')"
+          python -c "from pipeline.evolve import EvolveConfig, evolve; print('evolve ok')"
+          python -c "from pipeline.isf import parse_isf; print('isf ok')"
+
+      - name: Verify starter pack shaders parse
+        run: |
+          python -c "
+          from pathlib import Path
+          from pipeline.isf import parse_isf
+          shaders = list(Path('packs/starter/shaders').glob('*.fs'))
+          print(f'found {len(shaders)} shaders')
+          assert len(shaders) >= 29, f'expected >= 29 shaders, got {len(shaders)}'
+          for f in shaders:
+              s = parse_isf(f)
+              print(f'  {f.stem}: {len(s.inputs)} inputs')
+          print('all shaders parsed ok')
+          "
