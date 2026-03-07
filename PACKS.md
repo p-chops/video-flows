@@ -6,7 +6,7 @@ A pack is just a directory under `packs/` with two things inside: shaders and a 
 
 ```
 packs/
-├── starter/          ← ships with the repo (14 shaders, 12 stacks)
+├── starter/          ← ships with the repo (29 shaders, 24 stacks)
 │   ├── shaders/
 │   │   └── *.fs
 │   └── stacks.yaml
@@ -26,13 +26,13 @@ Have a folder of ISF `.fs` shaders? Two commands to go from shaders to rendered 
 
 ```bash
 # 1. Create the pack (validates, filters out broken shaders, generates stacks.yaml)
-python scripts/create_pack.py my_effects ~/Downloads/cool_shaders/
+vf pack create my_effects ~/Downloads/cool_shaders/
 
 # 2. Render a show reel with it
-python -m pipeline.flows.show_reel run -n 8 --pack my_effects --seed 42
+vf reel -n 8 --pack my_effects --seed 42
 ```
 
-`create_pack.py` does everything:
+`vf pack create` does everything:
 - Copies `.fs` files into `packs/my_effects/shaders/`
 - Parses each shader's ISF header and compile-tests the GLSL
 - Removes any shaders that fail validation (with a report)
@@ -43,20 +43,37 @@ Options:
 
 ```bash
 # Control the number of stacks (default: based on shader count)
-python scripts/create_pack.py my_effects ~/shaders/ --n-stacks 25
+vf pack create my_effects ~/shaders/ --n-stacks 25
 
 # Different random seed for different stack combinations
-python scripts/create_pack.py my_effects ~/shaders/ --seed 99
+vf pack create my_effects ~/shaders/ --seed 99
 
 # Shaders already in place? Just point at them
-python scripts/create_pack.py my_effects packs/my_effects/shaders/
+vf pack create my_effects packs/my_effects/shaders/
 ```
 
 To regenerate stacks for an existing pack (e.g., after adding/removing shaders):
 
 ```bash
-python scripts/generate_stacks.py packs/my_effects/shaders/ -o packs/my_effects/stacks.yaml
+vf pack stacks packs/my_effects/
 ```
+
+### Evolving stacks
+
+For higher-quality stacks, use `vf pack evolve` — it evaluates thousands of random shader combinations via headless GL rendering, scoring them on visual features (contrast, entropy, motion, color coherence, etc.), then selects a diverse set using greedy farthest-point selection:
+
+```bash
+# Evolve stacks for a pack (default: 2000 candidates, auto stack count)
+vf pack evolve packs/my_effects/ --seed 42
+
+# More candidates, more output stacks
+vf pack evolve packs/my_effects/ --candidates 5000 -n 30 --seed 42
+
+# Higher diversity weight (default 1.0)
+vf pack evolve packs/my_effects/ --diversity 2.0 --seed 42
+```
+
+Evolution uses 10 fitness features (spatial + temporal) with multiplicative penalties for degenerate output. Selection balances fitness against diversity in both feature space and shader composition (Jaccard distance), preventing any single shader from dominating.
 
 ### How procedural generation works
 
@@ -218,19 +235,14 @@ shader_params:
 ### 4. Verify it works
 
 ```bash
-# Check that your stacks load
-python -c "from pipeline.recipe import load_boutique_stacks; \
-    stacks = load_boutique_stacks(); \
-    print(f'{len(stacks)} stacks loaded'); \
-    for name, shaders, _, base in stacks: \
-        print(f'  {base.parent.name}/{name}: {shaders}')"
+# Check that your pack loads
+vf pack info my_pack -v
 
 # Plan a show reel restricted to your pack
-python -m pipeline.flows.show_reel plan -n 3 --seed 42 --pack my_pack
+vf reel plan -n 3 --seed 42 --pack my_pack
 
 # Short test render
-PREFECT_API_URL=http://127.0.0.1:4200/api \
-    python -m pipeline.flows.show_reel run -n 2 --min-dur 3 --max-dur 5 \
+vf reel -n 2 --min-dur 3 --max-dur 5 \
     --seed 42 --pack my_pack --width 640 --height 360
 ```
 
@@ -242,16 +254,16 @@ All flow CLIs accept `--pack` to restrict which packs are used. Repeatable for m
 
 ```bash
 # Use all installed packs (default)
-python -m pipeline.flows.show_reel run -n 8 --seed 42
+vf reel -n 8 --seed 42
 
 # Only use starter
-python -m pipeline.flows.show_reel run -n 8 --seed 42 --pack starter
+vf reel -n 8 --seed 42 --pack starter
 
 # Use both starter and my_pack
-python -m pipeline.flows.show_reel run -n 8 --seed 42 --pack starter --pack my_pack
+vf reel -n 8 --seed 42 --pack starter --pack my_pack
 ```
 
-`--pack` works on all subcommands: `plan`, `render`, `run`, `batch`.
+`--pack` works on all subcommands: `reel`, `show`, `stack`, and all reel sub-commands (`plan`, `render`, `run`, `batch`).
 
 ### Python
 
@@ -283,8 +295,8 @@ packs/*
 
 ## Tips
 
-- **Generate first, curate later.** Run `create_pack.py` to get a working pack immediately. Then hand-edit `stacks.yaml` to fine-tune your favorites — delete stacks you don't like, add custom ones, adjust parameter ranges.
-- **Test stacks with `plan` first.** `python -m pipeline.flows.show_reel plan -n 5 --seed 42 --pack my_pack` shows you exactly what recipes will be generated without rendering anything.
+- **Generate first, curate later.** Run `vf pack create` to get a working pack immediately. Then evolve stacks with `vf pack evolve` for higher quality, or hand-edit `stacks.yaml` to fine-tune your favorites.
+- **Test stacks with `plan` first.** `vf reel plan -n 5 --seed 42 --pack my_pack` shows you exactly what recipes will be generated without rendering anything.
 - **Shader order matters.** A posterize before an edge detector looks very different from the reverse. Experiment with ordering.
 - **Stacks are pure shader chains.** Time effects (echo, drift, scrub, etc.) come from archetypes, not from stacks. Your stacks just define the visual processing — the pipeline wraps them in temporal structure automatically.
 - **Mix processors and generators.** A pack can contain both. Processors are used in shader stacks; generators are used as source content for generator-mode shows (warp chains, etc.).

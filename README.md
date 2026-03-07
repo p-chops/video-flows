@@ -39,7 +39,7 @@ Shader packs are self-contained bundles of ISF shaders and curated combinations 
 
 ```
 packs/
-├── starter/          ← included — 14 shaders, 12 stacks
+├── starter/          ← included — 29 shaders, 24 stacks
 │   ├── shaders/
 │   └── stacks.yaml
 └── my_pack/          ← add your own (vf pack create)
@@ -150,6 +150,9 @@ vf pack create my_effects ~/Downloads/cool_shaders/
 
 # Regenerate stacks.yaml for an existing pack
 vf pack stacks packs/my_effects/
+
+# Evolve stacks via diversity-weighted random search
+vf pack evolve packs/my_effects/ --candidates 2000 -n 20 --seed 42
 ```
 
 ## What's in the box
@@ -157,7 +160,7 @@ vf pack stacks packs/my_effects/
 ### Processing capabilities
 
 - **Shader stacks** — chains of ISF v2 GLSL shaders applied via headless OpenGL (color, distortion, glitch, stylization)
-- **Time effects** — 21 temporal manipulations (scrub, drift, ping-pong, echo, slit scan, temporal sort, feedback transform, and more)
+- **Time effects** — 27 temporal manipulations (scrub, drift, ping-pong, echo, slit scan, temporal sort, feedback transform, datamosh, and more)
 - **Codec crush** — intentional quality destruction via fixed-QP encoding (x264, mpeg2, mpeg4)
 - **Compositing** — multi-lane blend, masked composite, picture-in-picture, chromakey
 - **Transitions** — crossfade, luma wipe, whip pan, static burst, flash
