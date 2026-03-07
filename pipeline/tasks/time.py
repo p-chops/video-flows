@@ -1226,6 +1226,7 @@ def _process_temporal_sort(
     *,
     mode: str = "luminance",
     direction: str = "ascending",
+    compensate: bool = True,
     seed: Optional[int] = None,
 ) -> list[np.ndarray]:
     """Sort pixels along time axis by luminance or channel."""
@@ -1253,6 +1254,19 @@ def _process_temporal_sort(
         channel = vol[:, :, :, ch]
         sorted_vol[:, :, :, ch] = np.take_along_axis(channel, order, axis=0)
 
+    if compensate:
+        # Per-frame mean luminance of the sorted output
+        luma = (0.299 * sorted_vol[:, :, :, 0].astype(np.float32)
+                + 0.587 * sorted_vol[:, :, :, 1].astype(np.float32)
+                + 0.114 * sorted_vol[:, :, :, 2].astype(np.float32))
+        frame_means = luma.mean(axis=(1, 2))  # (T,)
+        target = frame_means.mean()
+        if target > 1.0:
+            scalars = np.clip(target / np.maximum(frame_means, 1.0), 0.5, 2.0)
+            sorted_f = sorted_vol.astype(np.float32)
+            sorted_f *= scalars[:, np.newaxis, np.newaxis, np.newaxis]
+            sorted_vol = np.clip(sorted_f, 0, 255).astype(np.uint8)
+
     return [sorted_vol[i] for i in range(n)]
 
 
@@ -1263,6 +1277,7 @@ def temporal_sort(
     *,
     mode: str = "luminance",
     direction: str = "ascending",
+    compensate: bool = True,
     seed: Optional[int] = None,
     cfg: Optional[Config] = None,
 ) -> Path:
@@ -1295,7 +1310,7 @@ def temporal_sort(
         print(f"  loaded {n} frames ({mem_mb:.0f} MB)")
 
         t0 = _time.monotonic()
-        output = _process_temporal_sort(frames, info.fps, mode=mode, direction=direction, seed=seed)
+        output = _process_temporal_sort(frames, info.fps, mode=mode, direction=direction, compensate=compensate, seed=seed)
         sort_elapsed = _time.monotonic() - t0
         print(f"  sorted in {sort_elapsed:.1f}s")
 

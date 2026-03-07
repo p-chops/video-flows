@@ -190,6 +190,7 @@ class TemporalSortStep:
     """Temporal sort — sort pixel values across time, play sorted sequence."""
     mode: str = "luminance"      # "luminance", "red", "green", "blue"
     direction: str = "ascending" # "ascending" or "descending"
+    compensate: bool = True      # normalise per-frame brightness to counteract the sort ramp
 
 @dataclass
 class ExtremaHoldStep:
@@ -360,7 +361,8 @@ register_step("flow_warp", FlowWarpStep, random_fn=lambda rng, c: FlowWarpStep(
     smooth=rng.choice([9, 15, 21, 31])))
 register_step("temporal_sort", TemporalSortStep, random_fn=lambda rng, c: TemporalSortStep(
     mode=rng.choice(["luminance", "luminance", "red", "green", "blue"]),
-    direction=rng.choice(["ascending", "descending"])))
+    direction=rng.choice(["ascending", "descending"]),
+    compensate=rng.random() < 0.5))
 register_step("extrema_hold", ExtremaHoldStep, in_pool=False)
 register_step("feedback_transform", FeedbackTransformStep, random_fn=_random_feedback_transform)
 register_step("quad_loop", QuadLoopStep, random_fn=lambda rng, c: QuadLoopStep(
