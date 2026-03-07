@@ -1,8 +1,11 @@
 """
-Prefect flow for evolving shader stacks via genetic algorithm.
+Prefect flow for shader stack evolution.
+
+Discovers diverse, high-quality stacks via random search + greedy
+diversity-weighted selection.
 
 Usage:
-    vf pack evolve packs/starter/ --generations 20 --population 50 --seed 42
+    vf pack evolve packs/starter/ --candidates 2000 -n 15 --seed 42
 """
 
 from __future__ import annotations
@@ -15,19 +18,23 @@ from prefect import flow, get_run_logger
 
 from pipeline.config import Config
 from pipeline.evolve import (
-    EvolutionConfig,
+    EvolveConfig,
     evolve,
     genomes_to_stacks_yaml,
 )
 
 
-def _log_progress(gen: int, best_fitness: float, population: list) -> None:
-    """Called after each generation — logs to Prefect."""
+def _log_progress(gen: int, best_fitness: float, population: list, *, msg: str = "") -> None:
+    """Called during evolution — logs to Prefect."""
     try:
         logger = get_run_logger()
     except Exception:
         import logging
         logger = logging.getLogger(__name__)
+
+    if msg:
+        logger.info(msg)
+        return
 
     avg = sum(g.fitness for g in population) / len(population)
     best = max(population, key=lambda g: g.fitness)
@@ -40,14 +47,15 @@ def _log_progress(gen: int, best_fitness: float, population: list) -> None:
 @flow(name="evolve-stacks")
 def evolve_stacks(
     pack_dir: Path,
-    generations: int = 20,
-    population_size: int = 50,
+    n_candidates: int = 2000,
     n_output: Optional[int] = None,
+    diversity_weight: float = 1.0,
+    min_fitness: float = 0.5,
     seed: int = 42,
     output: Optional[Path] = None,
     cfg: Optional[Config] = None,
 ) -> Path:
-    """Evolve shader stacks using a genetic algorithm."""
+    """Discover diverse shader stacks via random search."""
     from scripts.generate_stacks import (
         validate_shaders,
         write_stacks_yaml,
@@ -68,26 +76,27 @@ def evolve_stacks(
         logger.error("no processor shaders — cannot evolve")
         return pack_dir
 
-    config = EvolutionConfig(
-        population_size=population_size,
-        generations=generations,
+    if n_output is None:
+        n_output = max(4, round(2.5 * math.sqrt(len(processors))))
+
+    config = EvolveConfig(
+        n_candidates=n_candidates,
+        n_output=n_output,
+        diversity_weight=diversity_weight,
+        min_fitness=min_fitness,
         seed=seed,
     )
 
     logger.info(
-        f"evolving: {config.population_size} population × "
-        f"{config.generations} generations"
+        f"evolving: {config.n_candidates} candidates → "
+        f"{config.n_output} stacks (λ={config.diversity_weight})"
     )
-    final_population = evolve(
+    selected = evolve(
         processors, generators, config,
         progress_callback=_log_progress,
     )
 
-    # Determine output count
-    if n_output is None:
-        n_output = max(4, round(2.5 * math.sqrt(len(processors))))
-
-    stacks = genomes_to_stacks_yaml(final_population, n_stacks=n_output)
+    stacks = genomes_to_stacks_yaml(selected, n_stacks=n_output)
 
     out_path = output or (pack_dir / "stacks.yaml")
     write_stacks_yaml(
@@ -97,12 +106,11 @@ def evolve_stacks(
         failures=failures,
     )
 
-    best = final_population[0] if final_population else None
-    if best:
-        logger.info(
-            f"best fitness: {best.fitness:.4f} — "
-            + " → ".join(g.shader_stem for g in best.genes)
-        )
+    if selected:
+        for i, g in enumerate(selected):
+            chain = " → ".join(gene.shader_stem for gene in g.genes)
+            logger.info(f"  {i+1:2d}. [{g.fitness:.3f}] {chain}")
+
     logger.info(f"wrote {len(stacks)} stacks to {out_path}")
 
     return out_path

@@ -1,23 +1,21 @@
 """
-Genetic algorithm for evolving shader stacks.
+Shader stack evolution via diversity-weighted random search.
 
 Evaluates candidate shader stacks by rendering frames in-memory via GL
 and scoring visual features. No file I/O during fitness evaluation.
 
 Usage (standalone):
-    from pipeline.evolve import evolve, EvolutionConfig
+    from pipeline.evolve import evolve, EvolveConfig
     from scripts.generate_stacks import validate_shaders
     processors, generators, _ = validate_shaders(Path("packs/starter/shaders"))
-    population = evolve(processors, generators, EvolutionConfig(seed=42))
+    selected = evolve(processors, generators, EvolveConfig(seed=42))
 """
 
 from __future__ import annotations
 
 import hashlib
 import random as _random_mod
-from copy import deepcopy
 from dataclasses import dataclass, field
-from math import sqrt
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Optional
 
@@ -50,7 +48,7 @@ class Genome:
 
 @dataclass
 class VisualFeatures:
-    """Feature set for GA fitness evaluation — balanced spatial + temporal."""
+    """Feature set for fitness evaluation — balanced spatial + temporal."""
     brightness: float           # mean luma [0, 1]
     contrast: float             # p95 − p5 luma [0, 1]
     spatial_entropy: float      # Laplacian variance, normalized
@@ -77,19 +75,17 @@ class VisualFeatures:
 
 
 @dataclass
-class EvolutionConfig:
-    population_size: int = 50
-    generations: int = 20
-    elite_count: int = 5
-    tournament_k: int = 3
-    crossover_rate: float = 0.7
-    mutation_rate: float = 0.3
+class EvolveConfig:
+    n_candidates: int = 2000
+    n_output: int = 15
     min_stack_size: int = 1
     max_stack_size: int = 5
     eval_frames: int = 5
     eval_width: int = 640
     eval_height: int = 360
     seed: int = 42
+    diversity_weight: float = 1.0  # λ: higher = more spread
+    min_fitness: float = 0.5       # floor: ignore low-quality candidates
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
 
 
@@ -97,15 +93,15 @@ class EvolutionConfig:
 
 DEFAULT_WEIGHTS: dict[str, float] = {
     "brightness": 0.0,          # penalty only
-    "contrast": 1.2,
-    "spatial_entropy": 1.5,
+    "contrast": 1.5,
+    "spatial_entropy": 2.0,
     "color_coherence": 1.0,
     "mid_frequency_ratio": 1.2,
     "spatial_autocorrelation": 1.2,
     "spectral_flatness": 0.0,   # multiplicative penalty, not additive
-    "frame_variance": 2.0,
-    "temporal_smoothness": 1.5,
-    "motion_magnitude": 3.0,    # highest weight — motion is king
+    "frame_variance": 1.5,
+    "temporal_smoothness": 1.0,
+    "motion_magnitude": 1.5,    # motion floor penalty handles the hard cutoff
 }
 
 _BRIGHTNESS_PENALTY_DARK = 0.08
@@ -166,6 +162,11 @@ def generate_source_frames(
     fbo_a.release()
     fbo_b.release()
     prog.release()
+
+    # Degenerate check — if all frames are near-black, fall back to noise
+    if all(f.mean() < 1.0 for f in frames):
+        return _noise_frames(seed, w, h, n_frames, time_spread, fps)
+
     return frames, frame_indices
 
 
@@ -380,8 +381,8 @@ def extract_features(frames: list[np.ndarray]) -> VisualFeatures:
 
         # Frame-to-frame diff (used for motion_magnitude + temporal_smoothness)
         if prev_gray is not None:
-            diff = np.abs(gray.astype(float) - prev_gray.astype(float)).mean()
-            frame_diffs.append(diff)
+            diff_img = np.abs(gray.astype(float) - prev_gray.astype(float))
+            frame_diffs.append(diff_img)
         prev_gray = gray
 
         # Mid-frequency ratio (3-band FFT: low / mid / high)
@@ -459,19 +460,21 @@ def extract_features(frames: list[np.ndarray]) -> VisualFeatures:
     frame_means = np.array(brightnesses)
     frame_var = float(frame_means.var()) if len(frame_means) > 1 else 0.0
 
-    # Motion magnitude: mean frame-to-frame pixel change, normalized to [0, 1]
+    # Motion magnitude — simple mean pixel diff between frames.
+    # The motion floor penalty in compute_fitness() handles the hard cutoff
+    # for static output. No fancy filtering needed here.
     if frame_diffs:
-        motion_mag = float(np.mean(frame_diffs) / 255.0)
+        motion_mag = float(np.mean([d.mean() / 255.0 for d in frame_diffs]))
     else:
         motion_mag = 0.0
 
-    # Temporal smoothness: 1 − coefficient of variation of frame diffs
+    # Temporal smoothness: 1 − coefficient of variation of per-frame mean diffs
     # Low CV = consistent motion (good), high CV = flickery (bad)
     if len(frame_diffs) >= 2:
-        diffs_arr = np.array(frame_diffs)
-        mean_diff = diffs_arr.mean()
+        per_frame_means = np.array([d.mean() for d in frame_diffs])
+        mean_diff = per_frame_means.mean()
         if mean_diff > 0.1:  # has meaningful motion
-            cv = diffs_arr.std() / mean_diff
+            cv = per_frame_means.std() / mean_diff
             temporal_smooth = float(max(0.0, min(1.0, 1.0 - cv)))
         else:
             temporal_smooth = 0.0  # static — no smoothness credit
@@ -537,36 +540,6 @@ def compute_fitness(
         score *= 0.1 + 0.9 * ((m - 0.005) / 0.015)
 
     return score
-
-
-def _shader_similarity(a: Genome, b: Genome) -> float:
-    """Fraction of shared shader stems between two genomes (Jaccard)."""
-    set_a = set(g.shader_stem for g in a.genes)
-    set_b = set(g.shader_stem for g in b.genes)
-    if not set_a and not set_b:
-        return 1.0
-    return len(set_a & set_b) / len(set_a | set_b)
-
-
-def apply_fitness_sharing(
-    population: list[Genome],
-    similarity_threshold: float = 0.6,
-    sharing_strength: float = 0.3,
-) -> None:
-    """Light niche penalty to maintain population diversity.
-
-    Genomes similar (Jaccard > threshold) to fitter ones get fitness
-    reduced. Gentle enough to let fitness features drive selection —
-    diversity should come from good features, not population penalties.
-    """
-    ranked = sorted(population, key=lambda g: g.fitness, reverse=True)
-    for i, genome in enumerate(ranked):
-        niche_count = 0
-        for j in range(i):  # only compare to fitter genomes
-            if _shader_similarity(genome, ranked[j]) > similarity_threshold:
-                niche_count += 1
-        if niche_count > 0:
-            genome.fitness /= (1.0 + sharing_strength * niche_count)
 
 
 # ─── Genome construction ─────────────────────────────────────────────────────
@@ -659,166 +632,32 @@ def evaluate_genome(
     return genome.fitness
 
 
-# ─── Genetic operators ────────────────────────────────────────────────────────
-
-def tournament_select(
-    rng: _random_mod.Random,
-    population: list[Genome],
-    k: int = 3,
-) -> Genome:
-    """Pick k random individuals, return the fittest."""
-    contestants = rng.sample(population, min(k, len(population)))
-    return max(contestants, key=lambda g: g.fitness)
-
-
-def crossover(
-    rng: _random_mod.Random,
-    parent_a: Genome,
-    parent_b: Genome,
-    max_size: int = 5,
-) -> Genome:
-    """Crossover two parents to produce a child."""
-    method = rng.choice(["single_point", "param_blend", "graft"])
-
-    if method == "single_point" and len(parent_a.genes) > 1 and len(parent_b.genes) > 1:
-        cut_a = rng.randint(1, len(parent_a.genes) - 1)
-        cut_b = rng.randint(1, len(parent_b.genes) - 1)
-        child_genes = deepcopy(parent_a.genes[:cut_a]) + deepcopy(parent_b.genes[cut_b:])
-        child_genes = child_genes[:max_size]
-
-    elif method == "param_blend":
-        # Keep parent_a's structure, blend params where shaders overlap
-        child_genes = deepcopy(parent_a.genes)
-        b_params = {g.shader_stem: g.params for g in parent_b.genes}
-        for gene in child_genes:
-            if gene.shader_stem in b_params:
-                for k, v in b_params[gene.shader_stem].items():
-                    if k in gene.params:
-                        a_val = gene.params[k]
-                        b_val = v
-                        if isinstance(a_val, (int, float)) and isinstance(b_val, (int, float)):
-                            t = rng.random()
-                            blended = a_val * t + b_val * (1 - t)
-                            gene.params[k] = int(round(blended)) if isinstance(a_val, int) else blended
-
-    else:  # graft
-        child_genes = deepcopy(parent_a.genes)
-        if parent_b.genes:
-            start = rng.randint(0, len(parent_b.genes) - 1)
-            end = rng.randint(start + 1, len(parent_b.genes))
-            graft_genes = deepcopy(parent_b.genes[start:end])
-            insert_at = rng.randint(0, len(child_genes))
-            child_genes = child_genes[:insert_at] + graft_genes + child_genes[insert_at:]
-            child_genes = child_genes[:max_size]
-
-    if not child_genes:
-        child_genes = deepcopy(parent_a.genes[:1])
-
-    return Genome(genes=child_genes, uid=_hex_uid(rng))
-
-
-def mutate(
-    rng: _random_mod.Random,
-    genome: Genome,
-    processors: list[ISFShader],
-    mutation_rate: float = 0.3,
-    min_size: int = 1,
-    max_size: int = 5,
-) -> Genome:
-    """Apply mutations to a genome."""
-    if rng.random() >= mutation_rate:
-        return genome
-
-    g = deepcopy(genome)
-    g.uid = _hex_uid(rng)
-
-    # Weighted mutation selection
-    mutations = [
-        ("perturb_params", 0.35),
-        ("swap_positions", 0.25),
-        ("replace_shader", 0.15),
-        ("insert_shader", 0.10),
-        ("delete_shader", 0.10),
-        ("reverse_segment", 0.05),
-    ]
-    total = sum(w for _, w in mutations)
-    roll = rng.random() * total
-    cumulative = 0.0
-    chosen = mutations[0][0]
-    for name, weight in mutations:
-        cumulative += weight
-        if roll <= cumulative:
-            chosen = name
-            break
-
-    if chosen == "perturb_params" and g.genes:
-        gene = rng.choice(g.genes)
-        if gene.params:
-            param_name = rng.choice(list(gene.params.keys()))
-            val = gene.params[param_name]
-            if isinstance(val, float):
-                gene.params[param_name] = val * (1.0 + rng.gauss(0, 0.2))
-            elif isinstance(val, int):
-                gene.params[param_name] = max(0, val + rng.choice([-1, 0, 1]))
-
-    elif chosen == "swap_positions" and len(g.genes) >= 2:
-        i, j = rng.sample(range(len(g.genes)), 2)
-        g.genes[i], g.genes[j] = g.genes[j], g.genes[i]
-
-    elif chosen == "replace_shader" and g.genes and processors:
-        idx = rng.randint(0, len(g.genes) - 1)
-        new_shader = rng.choice(processors)
-        concrete, spec = _sample_params(rng, new_shader)
-        g.genes[idx] = Gene(
-            shader_stem=new_shader.path.stem,
-            shader_path=new_shader.path,
-            params=concrete,
-            param_spec=spec,
-        )
-
-    elif chosen == "insert_shader" and len(g.genes) < max_size and processors:
-        new_shader = rng.choice(processors)
-        concrete, spec = _sample_params(rng, new_shader)
-        pos = rng.randint(0, len(g.genes))
-        g.genes.insert(pos, Gene(
-            shader_stem=new_shader.path.stem,
-            shader_path=new_shader.path,
-            params=concrete,
-            param_spec=spec,
-        ))
-
-    elif chosen == "delete_shader" and len(g.genes) > min_size:
-        idx = rng.randint(0, len(g.genes) - 1)
-        g.genes.pop(idx)
-
-    elif chosen == "reverse_segment" and len(g.genes) >= 3:
-        i = rng.randint(0, len(g.genes) - 2)
-        j = rng.randint(i + 2, len(g.genes))
-        g.genes[i:j] = g.genes[i:j][::-1]
-
-    return g
-
-
-# ─── Main evolution loop ─────────────────────────────────────────────────────
+# ─── Evolution: diversity-weighted random search ──────────────────────────────
 
 def evolve(
     processors: list[ISFShader],
     generators: list[ISFShader],
-    config: EvolutionConfig,
+    config: EvolveConfig,
     progress_callback: Optional[Callable] = None,
 ) -> list[Genome]:
-    """Run the genetic algorithm. Returns final population sorted by fitness."""
-    if not processors:
-        return []
+    """Find diverse, high-quality stacks via random search + greedy selection.
 
+    Phase 1: Generate and evaluate N random stacks.
+    Phase 2: Greedily select K stacks that are both high-fitness
+             and far apart in feature space.
+    """
     rng = _random_mod.Random(config.seed)
     gl = GLContext()
 
     try:
-        # Generate source frames from a random generator
-        # Frames are spread across 4 seconds to catch temporal divergence
-        if generators:
-            gen_shader = rng.choice(generators)
+        # Separate generators with/without inputImage
+        true_generators = [g for g in generators
+                           if not any(i.type == "image"
+                                      for i in g.image_inputs)]
+
+        # Generate source frames
+        if true_generators:
+            gen_shader = rng.choice(true_generators)
             source_frames, frame_indices = generate_source_frames(
                 gl, gen_shader, config.eval_width, config.eval_height,
                 n_frames=config.eval_frames, seed=config.seed,
@@ -829,66 +668,174 @@ def evolve(
                 config.eval_frames,
             )
 
-        # Initialize population
-        population = [
-            random_genome(rng, processors, config.min_stack_size, config.max_stack_size)
-            for _ in range(config.population_size)
-        ]
+        # Qualifying round
+        qualified = []
+        reject_reasons = {}
+        for shader in processors:
+            params = shader.default_params()
+            try:
+                out_frames = apply_stack_to_frames(
+                    gl, source_frames,
+                    [shader], {shader.path.stem: params},
+                    config.eval_width, config.eval_height,
+                    frame_indices=frame_indices,
+                )
+            except Exception:
+                reject_reasons[shader.path.stem] = "crash"
+                continue
 
-        # Evaluate initial population
-        for genome in population:
-            evaluate_genome(gl, genome, source_frames,
-                            config.eval_width, config.eval_height, config.weights,
-                            frame_indices=frame_indices)
-        apply_fitness_sharing(population)
+            diffs = []
+            for src_f, out_f in zip(source_frames, out_frames):
+                diffs.append(np.abs(src_f.astype(float) - out_f.astype(float)).mean() / 255.0)
+            mean_diff = float(np.mean(diffs))
+            out_brightness = float(np.mean([f.mean() for f in out_frames]) / 255.0)
+            out_lumas = [cv2.cvtColor(f, cv2.COLOR_RGB2GRAY) for f in out_frames]
+            out_contrast = float(np.mean([
+                (np.percentile(g, 95) - np.percentile(g, 5)) / 255.0 for g in out_lumas
+            ]))
 
-        for gen in range(config.generations):
-            population.sort(key=lambda g: g.fitness, reverse=True)
+            if mean_diff < 0.001:
+                reject_reasons[shader.path.stem] = "no-op"
+            elif out_brightness < 0.03 or out_brightness > 0.97:
+                reject_reasons[shader.path.stem] = "degenerate brightness"
+            elif out_contrast < 0.01:
+                reject_reasons[shader.path.stem] = "degenerate contrast"
+            else:
+                qualified.append(shader)
 
-            # Elitism
-            next_gen = [deepcopy(g) for g in population[:config.elite_count]]
+        if progress_callback:
+            progress_callback(-1, 0.0, [],
+                              msg=f"qualified {len(qualified)}/{len(processors)} shaders "
+                                  f"(rejected {len(processors) - len(qualified)}: "
+                                  + ", ".join(f"{r}={sum(1 for v in reject_reasons.values() if v == r)}"
+                                              for r in sorted(set(reject_reasons.values())))
+                                  + ")")
+        if len(qualified) < 3:
+            qualified = processors
+        processors = qualified
 
-            # Fill via selection + crossover + mutation
-            while len(next_gen) < config.population_size:
-                if rng.random() < config.crossover_rate:
-                    a = tournament_select(rng, population, config.tournament_k)
-                    b = tournament_select(rng, population, config.tournament_k)
-                    child = crossover(rng, a, b, config.max_stack_size)
-                else:
-                    child = deepcopy(tournament_select(rng, population, config.tournament_k))
+        # Phase 1: generate and evaluate random candidates
+        candidates: list[Genome] = []
+        n_source_rotations = max(1, config.n_candidates // 500)
+        batch_size = config.n_candidates // n_source_rotations
 
-                child = mutate(rng, child, processors, config.mutation_rate,
-                               config.min_stack_size, config.max_stack_size)
-                next_gen.append(child)
-
-            # Evaluate new individuals (skip elites)
-            for genome in next_gen[config.elite_count:]:
-                evaluate_genome(gl, genome, source_frames,
-                                config.eval_width, config.eval_height, config.weights,
-                                frame_indices=frame_indices)
-
-            # Fitness sharing: penalize crowded niches
-            apply_fitness_sharing(next_gen)
-
-            # Rotate source frames every 5 generations
-            if gen % 5 == 4 and generators:
-                gen_shader = rng.choice(generators)
+        for batch in range(n_source_rotations):
+            if batch > 0 and true_generators:
+                gen_shader = rng.choice(true_generators)
                 source_frames, frame_indices = generate_source_frames(
                     gl, gen_shader, config.eval_width, config.eval_height,
-                    n_frames=config.eval_frames, seed=config.seed + gen,
+                    n_frames=config.eval_frames,
+                    seed=config.seed + batch,
                 )
 
-            population = next_gen
+            for i in range(batch_size):
+                genome = random_genome(rng, processors,
+                                       config.min_stack_size,
+                                       config.max_stack_size)
+                evaluate_genome(gl, genome, source_frames,
+                                config.eval_width, config.eval_height,
+                                config.weights, frame_indices=frame_indices)
+                candidates.append(genome)
 
             if progress_callback:
-                best = max(population, key=lambda g: g.fitness)
-                progress_callback(gen + 1, best.fitness, population)
+                evaluated = len(candidates)
+                best = max(candidates, key=lambda g: g.fitness)
+                progress_callback(
+                    batch + 1, best.fitness, [],
+                    msg=f"evaluated {evaluated}/{config.n_candidates} candidates"
+                )
 
-        population.sort(key=lambda g: g.fitness, reverse=True)
-        return population
+        # Phase 2: greedy diversity-weighted selection
+        # Filter to minimum fitness
+        viable = [g for g in candidates if g.fitness >= config.min_fitness]
+        if len(viable) < config.n_output:
+            # Relax: take top n_output by fitness
+            candidates.sort(key=lambda g: g.fitness, reverse=True)
+            viable = candidates[:max(config.n_output * 2, 50)]
+
+        if progress_callback:
+            progress_callback(0, 0.0, [],
+                              msg=f"{len(viable)} viable candidates "
+                                  f"(fitness >= {config.min_fitness})")
+
+        selected = _greedy_diverse_select(
+            viable, config.n_output, config.diversity_weight)
+
+        if progress_callback and selected:
+            best = max(selected, key=lambda g: g.fitness)
+            progress_callback(
+                0, best.fitness, [],
+                msg=f"selected {len(selected)} diverse stacks "
+                    f"(fitness range {min(g.fitness for g in selected):.3f}"
+                    f"–{max(g.fitness for g in selected):.3f})")
+
+        return selected
 
     finally:
         gl.release()
+
+
+def _greedy_diverse_select(
+    candidates: list[Genome],
+    n: int,
+    diversity_weight: float,
+) -> list[Genome]:
+    """Greedily select n candidates maximizing fitness + diversity.
+
+    Each pick maximizes: fitness + λ * min_distance_to_any_selected
+    where distance is Euclidean in normalized feature space.
+    """
+    if not candidates:
+        return []
+
+    # Build feature matrix and normalize each dimension to [0, 1]
+    feature_names = VisualFeatures.FEATURE_NAMES
+    features = np.array([
+        [g.features.get(f, 0.0) for f in feature_names]
+        for g in candidates
+    ], dtype=np.float64)
+
+    # Normalize columns to [0, 1]
+    mins = features.min(axis=0)
+    maxs = features.max(axis=0)
+    ranges = maxs - mins
+    ranges[ranges < 1e-10] = 1.0  # avoid div by zero
+    normed = (features - mins) / ranges
+
+    fitnesses = np.array([g.fitness for g in candidates], dtype=np.float64)
+    # Normalize fitness to [0, 1] for fair weighting
+    f_min, f_max = fitnesses.min(), fitnesses.max()
+    if f_max - f_min > 1e-10:
+        norm_fit = (fitnesses - f_min) / (f_max - f_min)
+    else:
+        norm_fit = np.ones_like(fitnesses)
+
+    selected_indices: list[int] = []
+    # Start with highest fitness
+    selected_indices.append(int(np.argmax(fitnesses)))
+
+    for _ in range(min(n - 1, len(candidates) - 1)):
+        best_score = -1.0
+        best_idx = -1
+
+        for i in range(len(candidates)):
+            if i in selected_indices:
+                continue
+
+            # Min distance to any already selected
+            min_dist = min(
+                float(np.linalg.norm(normed[i] - normed[j]))
+                for j in selected_indices
+            )
+            score = norm_fit[i] + diversity_weight * min_dist
+            if score > best_score:
+                best_score = score
+                best_idx = i
+
+        if best_idx >= 0:
+            selected_indices.append(best_idx)
+
+    return [candidates[i] for i in selected_indices]
 
 
 # ─── Output conversion ───────────────────────────────────────────────────────

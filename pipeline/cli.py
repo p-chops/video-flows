@@ -378,13 +378,17 @@ def _add_pack_parsers(sub):
     p_stacks.add_argument("-o", "--output", type=Path, default=None)
 
     p_evolve = pack_sub.add_parser("evolve",
-                                    help="Evolve stacks via genetic algorithm")
+                                    help="Evolve diverse stacks via random search")
     p_evolve.add_argument("pack_dir", type=Path,
                            help="Pack directory (e.g., packs/my_effects/)")
-    p_evolve.add_argument("--generations", type=int, default=20)
-    p_evolve.add_argument("--population", type=int, default=50)
+    p_evolve.add_argument("--candidates", type=int, default=2000,
+                           help="Number of random candidates to evaluate")
     p_evolve.add_argument("-n", "--n-stacks", type=int, default=None,
                            help="Number of stacks to output (default: auto)")
+    p_evolve.add_argument("--diversity", type=float, default=1.0,
+                           help="Diversity weight λ (higher = more spread)")
+    p_evolve.add_argument("--min-fitness", type=float, default=0.5,
+                           help="Minimum fitness threshold")
     p_evolve.add_argument("--seed", type=int, default=42)
     p_evolve.add_argument("-o", "--output", type=Path, default=None)
 
@@ -574,9 +578,10 @@ def _handle_pack(args):
             sys.exit(1)
         evolve_stacks(
             pack_dir=pack_dir,
-            generations=args.generations,
-            population_size=args.population,
+            n_candidates=args.candidates,
             n_output=args.n_stacks,
+            diversity_weight=args.diversity,
+            min_fitness=args.min_fitness,
             seed=args.seed,
             output=args.output,
         )
