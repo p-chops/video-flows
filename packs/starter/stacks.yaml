@@ -1,6 +1,6 @@
 # Auto-generated shader stacks
-# 7 stacks from 8 processor shaders
-# 6 generator shaders available (not included in stacks)
+# 24 stacks from 12 processor shaders
+# 17 generator shaders available (not included in stacks)
 #
 # Parameter resolution:
 #   scalar       → used as-is
@@ -10,152 +10,710 @@ stacks:
   shadow_fade:
     shaders:
     - starter_mosaic
-    - starter_scanline
-    - starter_glow
-    - starter_glow
-    - starter_glow
+    - ulp-warp-fbm
     shader_params:
       starter_mosaic:
-        block_size: [0.0062, 0.0287]
-        color_levels: [5.5113, 9.7113]
-      starter_scanline:
-        line_count: [165.8246, 321.8246]
-        line_darkness: [0.5011, 0.7411]
-        barrel: [0.0835, 0.2335]
-        phosphor: [0.2328, 0.5328]
-        roll_speed: [0.0, 0.4466]
-      starter_glow:
-        glow_strength: [0.4819, 0.7819]
-        hue: [0.2377, 0.5377]
-        brightness: [0.85, 1.15]
+        block_size: [0.0083, 0.0308]
+        color_levels: [9.1963, 13.3963]
+      ulp-warp-fbm:
+        warp_strength: [0.4364, 0.8864]
+        warp_passes: [2.1653, 2.7653]
+        scale: [0.25, 2.2054]
+        octaves: [5.1783, 7.2783]
+        lacunarity: [2.4036, 3.2436]
+        gain: [0.4672, 0.6472]
+        drift_speed: [0.0, 0.2859]
+        drift_angle: [0.0379, 0.3379]
+        rot_per_octave: [0.3667, 0.8377]
+        brightness: [0.715, 1.285]
+        desaturate: [0.0, 0.15]
   burnt_prism:
     shaders:
-    - starter_shift
+    - starter_invert_luma
+    - ulp-warp-gravitational
+    - starter_feedback
+    - starter_edges
     - starter_scanline
-    - starter_glow
-    - starter_glow
-    - starter_glow
     shader_params:
-      starter_shift:
-        amount: [0.0, 0.0088]
-        angle: [0.0, 1.7464]
+      starter_invert_luma:
+        mix_amount: [0.7001, 1.0]
+        threshold: [0.0879, 0.3879]
+      ulp-warp-gravitational:
+        warp_strength: [0.0, 0.3301]
+        num_masses: [1.7359, 2.9359]
+        softening: [0.0197, 0.0794]
+        orbit_speed: [0.0, 0.3488]
+        orbit_radius: [0.1485, 0.2985]
+        mass_pulse: [0.0, 0.2413]
+        attraction: [0.6691, 1.0]
+        falloff: [1.4861, 2.5361]
+        time_offset: [1.8477, 31.8477]
+        brightness: [0.715, 1.285]
+        desaturate: [0.0, 0.15]
+      starter_feedback:
+        feedback_mix: [0.7331, 0.98]
+        zoom_amount: [0.0511, 0.1]
+        rotate_amount: [-0.0144, 0.0156]
+        dark_threshold: [0.078, 0.258]
+        color_drift: [0.0, 0.0046]
+      starter_edges:
+        threshold: [0.2075, 0.5075]
+        line_width: [0.5, 1.2158]
+        mix_amount: [0.6254, 0.9254]
+        invert_bg: [0.064, 0.364]
+        color_mode: 1
       starter_scanline:
-        line_count: [163.0987, 319.0987]
-        line_darkness: [0.5049, 0.7449]
-        barrel: [0.1089, 0.2589]
-        phosphor: [0.2081, 0.5081]
-        roll_speed: [0.0, 0.4125]
-      starter_glow:
-        glow_strength: [0.4767, 0.7767]
-        hue: [0.2363, 0.5363]
-        brightness: [0.85, 1.15]
+        line_count: [240.199, 396.199]
+        line_darkness: [0.4091, 0.6491]
+        barrel: [0.0, 0.1333]
+        phosphor: [0.1786, 0.4786]
+        roll_speed: [0.0, 0.3108]
   frozen_mesh:
     shaders:
-    - starter_kaleido
-    - starter_scanline
-    - starter_glow
-    - starter_glow
+    - starter_warp
+    - starter_invert_luma
     - starter_glow
     shader_params:
-      starter_kaleido:
-        segments: [2.0, 4.8396]
-        spin: [0.0, 0.1574]
-        zoom: [0.5, 1.1465]
-      starter_scanline:
-        line_count: [162.138, 318.138]
-        line_darkness: [0.7118, 0.8]
-        barrel: [0.1124, 0.2624]
-        phosphor: [0.2055, 0.5055]
-        roll_speed: [0.0, 0.4066]
+      starter_warp:
+        amplitude: [0.0362, 0.0812]
+        frequency: [6.5044, 12.2044]
+        speed: [0.0501, 0.6351]
+        layers: [2.1335, 3.6335]
+      starter_invert_luma:
+        mix_amount: [0.7853, 1.0]
+        threshold: [0.0, 0.1925]
       starter_glow:
-        glow_strength: [0.406, 0.706]
-        hue: [0.1366, 0.4366]
+        glow_strength: [0.3169, 0.6169]
+        hue: [0.2488, 0.5488]
         brightness: [0.85, 1.15]
   distant_edge:
     shaders:
-    - starter_mosaic
-    - starter_scanline
-    - starter_glow
-    - starter_glow
-    shader_params:
-      starter_mosaic:
-        block_size: [0.0061, 0.0286]
-        color_levels: [5.5113, 9.7113]
-      starter_scanline:
-        line_count: [163.6364, 319.6364]
-        line_darkness: [0.4841, 0.7241]
-        barrel: [0.1024, 0.2524]
-        phosphor: [0.217, 0.517]
-        roll_speed: [0.0, 0.4135]
-      starter_glow:
-        glow_strength: [0.4603, 0.7603]
-        hue: [0.1988, 0.4988]
-        brightness: [0.85, 1.15]
-  signal_drain:
-    shaders:
     - starter_kaleido
-    - starter_warp
-    - starter_scanline
+    - starter_edges
     - starter_glow
-    - starter_glow
+    - ulp-warp-fbm
     shader_params:
       starter_kaleido:
-        segments: [2.0, 4.8396]
-        spin: [0.0, 0.1574]
-        zoom: [0.5, 1.1465]
-      starter_warp:
-        amplitude: [0.0191, 0.0641]
-        frequency: [6.4663, 12.1663]
-        speed: [0.4094, 0.9944]
-        layers: [2.2554, 3.7554]
-      starter_scanline:
-        line_count: [156.896, 312.896]
-        line_darkness: [0.4921, 0.7321]
-        barrel: [0.1392, 0.2892]
-        phosphor: [0.2074, 0.5074]
-        roll_speed: [0.0, 0.4037]
+        segments: [5.8525, 10.0525]
+        spin: [0.0778, 0.3778]
+        zoom: [1.0153, 1.7653]
+      starter_edges:
+        threshold: [0.2615, 0.5615]
+        line_width: [0.5, 1.0898]
+        mix_amount: [0.5162, 0.8162]
+        invert_bg: [0.1455, 0.4455]
+        color_mode: 1
       starter_glow:
-        glow_strength: [0.4716, 0.7716]
-        hue: [0.1237, 0.4237]
+        glow_strength: [0.1514, 0.4514]
+        hue: [0.528, 0.828]
         brightness: [0.85, 1.15]
+      ulp-warp-fbm:
+        warp_strength: [0.2116, 0.6616]
+        warp_passes: [2.1702, 2.7702]
+        scale: [2.6058, 4.9308]
+        octaves: [4.6192, 6.7192]
+        lacunarity: [2.3858, 3.2258]
+        gain: [0.3543, 0.5343]
+        drift_speed: [0.0, 0.1866]
+        drift_angle: [0.1439, 0.4439]
+        rot_per_octave: [0.0, 0.2938]
+        brightness: [0.715, 1.285]
+        desaturate: [0.0, 0.15]
+  signal_drain:
+    shaders:
+    - starter_duotone
+    - starter_edges
+    shader_params:
+      starter_duotone:
+        shadow_hue: [0.2153, 0.5153]
+        highlight_hue: [0.0, 0.2338]
+        saturation: [0.466, 0.766]
+        contrast: [0.6893, 1.4393]
+        mix_amount: [0.6746, 0.9746]
+      starter_edges:
+        threshold: [0.1965, 0.4965]
+        line_width: [0.6707, 1.7207]
+        mix_amount: [0.5823, 0.8823]
+        invert_bg: [0.0317, 0.3317]
+        color_mode: 2
   rich_tomb:
     shaders:
-    - starter_shift
-    - starter_scanline
-    - starter_glow
-    - starter_glow
+    - starter_invert_luma
+    - starter_mosaic
+    - starter_feedback
+    - starter_warp
+    - starter_edges
     shader_params:
-      starter_shift:
-        amount: [0.0, 0.0088]
-        angle: [0.0, 1.7464]
-      starter_scanline:
-        line_count: [162.3616, 318.3616]
-        line_darkness: [0.5042, 0.7442]
-        barrel: [0.1009, 0.2509]
-        phosphor: [0.2233, 0.5233]
-        roll_speed: [0.0, 0.4405]
-      starter_glow:
-        glow_strength: [0.4615, 0.7615]
-        hue: [0.1646, 0.4646]
-        brightness: [0.85, 1.15]
+      starter_invert_luma:
+        mix_amount: [0.7645, 1.0]
+        threshold: [0.1084, 0.4084]
+      starter_mosaic:
+        block_size: [0.005, 0.0257]
+        color_levels: [3.7742, 7.9742]
+      starter_feedback:
+        feedback_mix: [0.6561, 0.9501]
+        zoom_amount: [0.0329, 0.0929]
+        rotate_amount: [-0.0325, -0.0025]
+        dark_threshold: [0.2834, 0.4634]
+        color_drift: [0.0064, 0.0154]
+      starter_warp:
+        amplitude: [0.0266, 0.0716]
+        frequency: [1.2933, 6.9933]
+        speed: [0.1227, 0.7077]
+        layers: [2.5069, 4.0069]
+      starter_edges:
+        threshold: [0.0, 0.2172]
+        line_width: [0.5, 1.1385]
+        mix_amount: [0.415, 0.715]
+        invert_bg: [0.1408, 0.4408]
+        color_mode: 2
   cold_burn:
     shaders:
-    - starter_glow
     - starter_scanline
-    - starter_mosaic
-    - starter_glow
+    - starter_warp
+    - ulp-warp-fbm
+    - starter_feedback
+    - ulp-warp-gravitational
+    shader_params:
+      starter_scanline:
+        line_count: [341.8105, 497.8105]
+        line_darkness: [0.4699, 0.7099]
+        barrel: [0.1848, 0.3348]
+        phosphor: [0.3379, 0.6379]
+        roll_speed: [0.0, 0.5273]
+      starter_warp:
+        amplitude: [0.0276, 0.0726]
+        frequency: [1.0, 5.5076]
+        speed: [0.2421, 0.8271]
+        layers: [2.5324, 4.0324]
+      ulp-warp-fbm:
+        warp_strength: [0.3644, 0.8144]
+        warp_passes: [2.2479, 2.8479]
+        scale: [0.25, 2.4764]
+        octaves: [5.245, 7.345]
+        lacunarity: [2.1987, 3.0387]
+        gain: [0.5282, 0.7082]
+        drift_speed: [0.1839, 0.4839]
+        drift_angle: [0.0731, 0.3731]
+        rot_per_octave: [0.0, 0.4526]
+        brightness: [0.715, 1.285]
+        desaturate: [0.0, 0.15]
+      starter_feedback:
+        feedback_mix: [0.8268, 0.98]
+        zoom_amount: [0.0216, 0.0816]
+        rotate_amount: [-0.0041, 0.0259]
+        dark_threshold: [0.0325, 0.2125]
+        color_drift: [0.0, 0.0072]
+      ulp-warp-gravitational:
+        warp_strength: [0.0, 0.3454]
+        num_masses: [2.7304, 3.9304]
+        softening: [0.0109, 0.0706]
+        orbit_speed: [0.0, 0.3073]
+        orbit_radius: [0.0801, 0.2301]
+        mass_pulse: [0.0, 0.2444]
+        attraction: [0.5923, 1.0]
+        falloff: [1.7278, 2.7778]
+        time_offset: [0.0, 16.3091]
+        brightness: [0.715, 1.285]
+        desaturate: [0.0, 0.15]
+  dark_loop:
+    shaders:
+    - starter_feedback
+    - starter_shift
+    - starter_edges
+    - starter_warp
+    shader_params:
+      starter_feedback:
+        feedback_mix: [0.7446, 0.98]
+        zoom_amount: [0.0107, 0.0707]
+        rotate_amount: [0.0231, 0.05]
+        dark_threshold: [0.2378, 0.4178]
+        color_drift: [0.0, 0.0069]
+      starter_shift:
+        amount: [0.0131, 0.0281]
+        angle: [0.6563, 2.5412]
+      starter_edges:
+        threshold: [0.2487, 0.5487]
+        line_width: [1.0662, 2.1162]
+        mix_amount: [0.4457, 0.7457]
+        invert_bg: [0.0, 0.1872]
+        color_mode: 2
+      starter_warp:
+        amplitude: [0.0341, 0.0791]
+        frequency: [3.1564, 8.8564]
+        speed: [0.3408, 0.9258]
+        layers: [1.2611, 2.7611]
+  fever_bone:
+    shaders:
+    - starter_duotone
+    - starter_kaleido
+    - ulp-warp-fbm
+    - starter_invert_luma
     - starter_glow
     shader_params:
+      starter_duotone:
+        shadow_hue: [0.2087, 0.5087]
+        highlight_hue: [0.0681, 0.3681]
+        saturation: [0.7674, 1.0]
+        contrast: [1.4838, 2.2338]
+        mix_amount: [0.8366, 1.0]
+      starter_kaleido:
+        segments: [4.9595, 9.1595]
+        spin: [0.0795, 0.3795]
+        zoom: [0.5, 1.107]
+      ulp-warp-fbm:
+        warp_strength: [0.0566, 0.5066]
+        warp_passes: [2.136, 2.736]
+        scale: [3.106, 5.431]
+        octaves: [4.9657, 7.0657]
+        lacunarity: [2.3902, 3.2302]
+        gain: [0.571, 0.751]
+        drift_speed: [0.1415, 0.4415]
+        drift_angle: [0.0, 0.2016]
+        rot_per_octave: [0.0, 0.2687]
+        brightness: [0.715, 1.285]
+        desaturate: [0.0, 0.15]
+      starter_invert_luma:
+        mix_amount: [0.784, 1.0]
+        threshold: [0.0, 0.287]
       starter_glow:
-        glow_strength: [0.4622, 0.7622]
-        hue: [0.1652, 0.4652]
+        glow_strength: [0.5812, 0.8812]
+        hue: [0.2745, 0.5745]
+        brightness: [0.85, 1.15]
+  raw_hum:
+    shaders:
+    - starter_edges
+    - starter_duotone
+    - starter_invert_luma
+    - starter_feedback
+    shader_params:
+      starter_edges:
+        threshold: [0.0, 0.2178]
+        line_width: [0.8393, 1.8893]
+        mix_amount: [0.5343, 0.8343]
+        invert_bg: [0.0, 0.2157]
+        color_mode: 2
+      starter_duotone:
+        shadow_hue: [0.3964, 0.6964]
+        highlight_hue: [0.2134, 0.5134]
+        saturation: [0.4833, 0.7833]
+        contrast: [0.9682, 1.7182]
+        mix_amount: [0.7768, 1.0]
+      starter_invert_luma:
+        mix_amount: [0.748, 1.0]
+        threshold: [0.0, 0.2994]
+      starter_feedback:
+        feedback_mix: [0.4415, 0.7355]
+        zoom_amount: [0.0589, 0.1]
+        rotate_amount: [-0.0316, -0.0016]
+        dark_threshold: [0.2373, 0.4173]
+        color_drift: [0.0071, 0.0161]
+  slow_tide:
+    shaders:
+    - starter_scanline
+    - starter_duotone
+    - starter_warp
+    - starter_glow
+    shader_params:
+      starter_scanline:
+        line_count: [148.6825, 304.6825]
+        line_darkness: [0.396, 0.636]
+        barrel: [0.0335, 0.1835]
+        phosphor: [0.0, 0.2443]
+        roll_speed: [0.1805, 0.7805]
+      starter_duotone:
+        shadow_hue: [0.2764, 0.5764]
+        highlight_hue: [0.0, 0.1637]
+        saturation: [0.7011, 1.0]
+        contrast: [1.1716, 1.9216]
+        mix_amount: [0.8194, 1.0]
+      starter_warp:
+        amplitude: [0.0256, 0.0706]
+        frequency: [1.0, 5.0299]
+        speed: [0.2225, 0.8075]
+        layers: [1.0, 2.4958]
+      starter_glow:
+        glow_strength: [0.4447, 0.7447]
+        hue: [0.6236, 0.9236]
+        brightness: [0.85, 1.15]
+  fever_tunnel:
+    shaders:
+    - starter_edges
+    - starter_scanline
+    - starter_warp
+    shader_params:
+      starter_edges:
+        threshold: [0.0159, 0.3159]
+        line_width: [1.3147, 2.3647]
+        mix_amount: [0.8213, 1.0]
+        invert_bg: [0.066, 0.366]
+        color_mode: 1
+      starter_scanline:
+        line_count: [170.8605, 326.8605]
+        line_darkness: [0.4758, 0.7158]
+        barrel: [0.0396, 0.1896]
+        phosphor: [0.2086, 0.5086]
+        roll_speed: [0.0, 0.5656]
+      starter_warp:
+        amplitude: [0.0, 0.0317]
+        frequency: [5.4287, 11.1287]
+        speed: [0.6587, 1.2437]
+        layers: [2.905, 4.405]
+  rich_pulse:
+    shaders:
+    - ulp-warp-gravitational
+    - starter_edges
+    - starter_duotone
+    - starter_kaleido
+    shader_params:
+      ulp-warp-gravitational:
+        warp_strength: [0.0, 0.5741]
+        num_masses: [2.4793, 3.6793]
+        softening: [0.001, 0.0459]
+        orbit_speed: [0.4564, 1.0564]
+        orbit_radius: [0.2468, 0.3968]
+        mass_pulse: [0.0, 0.1814]
+        attraction: [0.3233, 0.9233]
+        falloff: [1.9716, 3.0216]
+        time_offset: [0.0, 29.5674]
+        brightness: [0.715, 1.285]
+        desaturate: [0.0, 0.15]
+      starter_edges:
+        threshold: [0.0822, 0.3822]
+        line_width: [0.9325, 1.9825]
+        mix_amount: [0.5551, 0.8551]
+        invert_bg: [0.0, 0.2937]
+        color_mode: 2
+      starter_duotone:
+        shadow_hue: [0.2355, 0.5355]
+        highlight_hue: [0.0, 0.2165]
+        saturation: [0.2666, 0.5666]
+        contrast: [0.5, 1.1124]
+        mix_amount: [0.5717, 0.8717]
+      starter_kaleido:
+        segments: [7.7461, 11.9461]
+        spin: [0.0, 0.2249]
+        zoom: [1.1008, 1.8508]
+  strange_beam:
+    shaders:
+    - starter_mosaic
+    - starter_glow
+    - starter_duotone
+    - ulp-warp-gravitational
+    shader_params:
+      starter_mosaic:
+        block_size: [0.0104, 0.0329]
+        color_levels: [3.6436, 7.8436]
+      starter_glow:
+        glow_strength: [0.5388, 0.8388]
+        hue: [0.3056, 0.6056]
+        brightness: [0.85, 1.15]
+      starter_duotone:
+        shadow_hue: [0.3311, 0.6311]
+        highlight_hue: [0.0, 0.2717]
+        saturation: [0.2577, 0.5577]
+        contrast: [1.3196, 2.0696]
+        mix_amount: [0.6549, 0.9549]
+      ulp-warp-gravitational:
+        warp_strength: [0.3383, 0.9383]
+        num_masses: [2.665, 3.865]
+        softening: [0.001, 0.052]
+        orbit_speed: [0.0181, 0.6181]
+        orbit_radius: [0.1414, 0.2914]
+        mass_pulse: [0.1417, 0.4417]
+        attraction: [0.628, 1.0]
+        falloff: [1.0288, 2.0788]
+        time_offset: [0.0981, 30.0981]
+        brightness: [0.715, 1.285]
+        desaturate: [0.0, 0.15]
+  static_frost:
+    shaders:
+    - starter_feedback
+    - starter_edges
+    - ulp-warp-fbm
+    shader_params:
+      starter_feedback:
+        feedback_mix: [0.8079, 0.98]
+        zoom_amount: [0.0486, 0.1]
+        rotate_amount: [0.023, 0.05]
+        dark_threshold: [0.1583, 0.3383]
+        color_drift: [0.0013, 0.0103]
+      starter_edges:
+        threshold: [0.0, 0.2022]
+        line_width: [0.5, 1.4237]
+        mix_amount: [0.3304, 0.6304]
+        invert_bg: [0.006, 0.306]
+        color_mode: 2
+      ulp-warp-fbm:
+        warp_strength: [0.0496, 0.4996]
+        warp_passes: [1.3693, 1.9693]
+        scale: [0.4186, 2.7436]
+        octaves: [5.7696, 7.8696]
+        lacunarity: [2.3044, 3.1444]
+        gain: [0.4876, 0.6676]
+        drift_speed: [0.1661, 0.4661]
+        drift_angle: [0.104, 0.404]
+        rot_per_octave: [0.0, 0.3707]
+        brightness: [0.715, 1.285]
+        desaturate: [0.0, 0.15]
+  silent_tomb:
+    shaders:
+    - starter_edges
+    - starter_shift
+    shader_params:
+      starter_edges:
+        threshold: [0.2503, 0.5503]
+        line_width: [0.5, 1.5499]
+        mix_amount: [0.4745, 0.7745]
+        invert_bg: [0.0669, 0.3669]
+        color_mode: 1
+      starter_shift:
+        amount: [0.009, 0.024]
+        angle: [0.0, 1.6251]
+  hollow_pulse:
+    shaders:
+    - starter_warp
+    - starter_mosaic
+    - starter_edges
+    - starter_duotone
+    - ulp-warp-fbm
+    shader_params:
+      starter_warp:
+        amplitude: [0.0, 0.0376]
+        frequency: [1.0, 6.6201]
+        speed: [0.7758, 1.3608]
+        layers: [2.3556, 3.8556]
+      starter_mosaic:
+        block_size: [0.0139, 0.0364]
+        color_levels: [8.9592, 13.1592]
+      starter_edges:
+        threshold: [0.1021, 0.4021]
+        line_width: [0.5, 1.465]
+        mix_amount: [0.5764, 0.8764]
+        invert_bg: [0.023, 0.323]
+        color_mode: 2
+      starter_duotone:
+        shadow_hue: [0.2056, 0.5056]
+        highlight_hue: [0.0993, 0.3993]
+        saturation: [0.4901, 0.7901]
+        contrast: [0.9692, 1.7192]
+        mix_amount: [0.5623, 0.8623]
+      ulp-warp-fbm:
+        warp_strength: [0.0, 0.3323]
+        warp_passes: [1.3488, 1.9488]
+        scale: [2.3026, 4.6276]
+        octaves: [5.6624, 7.7624]
+        lacunarity: [1.4988, 2.3388]
+        gain: [0.4617, 0.6417]
+        drift_speed: [0.0, 0.1524]
+        drift_angle: [0.0, 0.175]
+        rot_per_octave: [0.699, 1.17]
+        brightness: [0.715, 1.285]
+        desaturate: [0.0, 0.15]
+  dream_loop:
+    shaders:
+    - starter_duotone
+    - starter_shift
+    - starter_edges
+    shader_params:
+      starter_duotone:
+        shadow_hue: [0.5858, 0.8858]
+        highlight_hue: [0.0, 0.1568]
+        saturation: [0.7726, 1.0]
+        contrast: [0.5, 1.2498]
+        mix_amount: [0.5917, 0.8917]
+      starter_shift:
+        amount: [0.0009, 0.0159]
+        angle: [0.0, 1.6261]
+      starter_edges:
+        threshold: [0.0228, 0.3228]
+        line_width: [0.5, 1.179]
+        mix_amount: [0.7592, 1.0]
+        invert_bg: [0.0144, 0.3144]
+        color_mode: 2
+  static_slice:
+    shaders:
+    - ulp-warp-fbm
+    - starter_glow
+    - starter_scanline
+    - starter_invert_luma
+    - starter_edges
+    shader_params:
+      ulp-warp-fbm:
+        warp_strength: [0.4213, 0.8713]
+        warp_passes: [1.6088, 2.2088]
+        scale: [1.2132, 3.5382]
+        octaves: [4.7666, 6.8666]
+        lacunarity: [1.3609, 2.2009]
+        gain: [0.5565, 0.7365]
+        drift_speed: [0.0304, 0.3304]
+        drift_angle: [0.0, 0.2314]
+        rot_per_octave: [0.4834, 0.9544]
+        brightness: [0.715, 1.285]
+        desaturate: [0.0, 0.15]
+      starter_glow:
+        glow_strength: [0.4217, 0.7217]
+        hue: [0.6546, 0.9546]
         brightness: [0.85, 1.15]
       starter_scanline:
-        line_count: [165.7586, 321.7586]
-        line_darkness: [0.5017, 0.7417]
-        barrel: [0.0863, 0.2363]
-        phosphor: [0.2305, 0.5305]
-        roll_speed: [0.0, 0.4404]
+        line_count: [260.6445, 416.6445]
+        line_darkness: [0.3356, 0.5756]
+        barrel: [0.0, 0.0931]
+        phosphor: [0.1465, 0.4465]
+        roll_speed: [0.0, 0.3285]
+      starter_invert_luma:
+        mix_amount: [0.6853, 0.9853]
+        threshold: [0.1243, 0.4243]
+      starter_edges:
+        threshold: [0.1716, 0.4716]
+        line_width: [0.5, 1.4166]
+        mix_amount: [0.8131, 1.0]
+        invert_bg: [0.0, 0.2082]
+        color_mode: 0
+  deep_drift:
+    shaders:
+    - starter_scanline
+    - starter_mosaic
+    - starter_edges
+    - ulp-warp-gravitational
+    - starter_shift
+    shader_params:
+      starter_scanline:
+        line_count: [360.1609, 516.1609]
+        line_darkness: [0.215, 0.455]
+        barrel: [0.0138, 0.1638]
+        phosphor: [0.2719, 0.5719]
+        roll_speed: [0.0058, 0.6058]
       starter_mosaic:
-        block_size: [0.006, 0.0285]
-        color_levels: [5.5113, 9.7113]
+        block_size: [0.0052, 0.0277]
+        color_levels: [4.7178, 8.9178]
+      starter_edges:
+        threshold: [0.1301, 0.4301]
+        line_width: [0.6693, 1.7193]
+        mix_amount: [0.7564, 1.0]
+        invert_bg: [0.0, 0.2752]
+        color_mode: 1
+      ulp-warp-gravitational:
+        warp_strength: [0.4301, 1.0301]
+        num_masses: [1.5336, 2.7336]
+        softening: [0.0299, 0.0896]
+        orbit_speed: [0.0, 0.575]
+        orbit_radius: [0.3445, 0.4945]
+        mass_pulse: [0.0, 0.2544]
+        attraction: [0.2797, 0.8797]
+        falloff: [1.05, 2.1]
+        time_offset: [0.0, 27.5342]
+        brightness: [0.715, 1.285]
+        desaturate: [0.0, 0.15]
+      starter_shift:
+        amount: [0.0, 0.0093]
+        angle: [0.3341, 2.2191]
+  liquid_dust:
+    shaders:
+    - starter_feedback
+    - starter_edges
+    shader_params:
+      starter_feedback:
+        feedback_mix: [0.6183, 0.9123]
+        zoom_amount: [-0.0535, 0.0065]
+        rotate_amount: [-0.0347, -0.0047]
+        dark_threshold: [0.2847, 0.4647]
+        color_drift: [0.0095, 0.0185]
+      starter_edges:
+        threshold: [0.271, 0.571]
+        line_width: [0.5, 1.0432]
+        mix_amount: [0.4681, 0.7681]
+        invert_bg: [0.1278, 0.4278]
+        color_mode: 0
+  hot_smear:
+    shaders:
+    - starter_edges
+    - starter_scanline
+    shader_params:
+      starter_edges:
+        threshold: [0.2539, 0.5539]
+        line_width: [0.6753, 1.7253]
+        mix_amount: [0.6058, 0.9058]
+        invert_bg: [0.128, 0.428]
+        color_mode: 1
+      starter_scanline:
+        line_count: [336.384, 492.384]
+        line_darkness: [0.2155, 0.4555]
+        barrel: [0.0, 0.1317]
+        phosphor: [0.3454, 0.6454]
+        roll_speed: [0.109, 0.709]
+  rust_plume:
+    shaders:
+    - starter_feedback
+    - starter_kaleido
+    - ulp-warp-gravitational
+    - starter_shift
+    - starter_edges
+    shader_params:
+      starter_feedback:
+        feedback_mix: [0.5424, 0.8364]
+        zoom_amount: [0.003, 0.063]
+        rotate_amount: [0.006, 0.036]
+        dark_threshold: [0.0, 0.1415]
+        color_drift: [0.0082, 0.0172]
+      starter_kaleido:
+        segments: [7.4999, 11.6999]
+        spin: [0.1962, 0.4962]
+        zoom: [0.5, 1.0309]
+      ulp-warp-gravitational:
+        warp_strength: [0.3584, 0.9584]
+        num_masses: [2.4707, 3.6707]
+        softening: [0.0493, 0.109]
+        orbit_speed: [0.0941, 0.6941]
+        orbit_radius: [0.2733, 0.4233]
+        mass_pulse: [0.0, 0.2193]
+        attraction: [0.2659, 0.8659]
+        falloff: [0.9626, 2.0126]
+        time_offset: [10.9515, 40.9515]
+        brightness: [0.715, 1.285]
+        desaturate: [0.0, 0.15]
+      starter_shift:
+        amount: [0.0, 0.0079]
+        angle: [0.0, 1.5774]
+      starter_edges:
+        threshold: [0.138, 0.438]
+        line_width: [0.5, 1.461]
+        mix_amount: [0.3893, 0.6893]
+        invert_bg: [0.0594, 0.3594]
+        color_mode: 1
+  strange_circuit:
+    shaders:
+    - starter_glow
+    - starter_mosaic
+    - starter_edges
+    - ulp-warp-fbm
+    - starter_shift
+    shader_params:
+      starter_glow:
+        glow_strength: [0.5097, 0.8097]
+        hue: [0.6335, 0.9335]
+        brightness: [0.85, 1.15]
+      starter_mosaic:
+        block_size: [0.0085, 0.031]
+        color_levels: [8.3123, 12.5123]
+      starter_edges:
+        threshold: [0.046, 0.346]
+        line_width: [0.5, 1.1775]
+        mix_amount: [0.4313, 0.7313]
+        invert_bg: [0.135, 0.435]
+        color_mode: 1
+      ulp-warp-fbm:
+        warp_strength: [0.335, 0.785]
+        warp_passes: [1.796, 2.396]
+        scale: [3.4157, 5.7407]
+        octaves: [3.0319, 5.1319]
+        lacunarity: [1.2, 1.7879]
+        gain: [0.5128, 0.6928]
+        drift_speed: [0.1923, 0.4923]
+        drift_angle: [0.0, 0.2291]
+        rot_per_octave: [0.2303, 0.7013]
+        brightness: [0.715, 1.285]
+        desaturate: [0.0, 0.15]
+      starter_shift:
+        amount: [0.0171, 0.0321]
+        angle: [0.3055, 2.1904]
