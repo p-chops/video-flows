@@ -22,6 +22,9 @@ env/
 *~
 .DS_Store
 
+# Claude Code
+CLAUDE.md
+
 # Pipeline working files and output
 work/
 output/
