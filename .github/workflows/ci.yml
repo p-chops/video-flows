@@ -31,6 +31,8 @@ jobs:
         run: |
           vf reel --help
           vf show --help
+          vf shows --help
+          vf join --help
           vf stack --help
           vf pack --help
 
@@ -54,7 +56,7 @@ jobs:
           from pipeline.isf import parse_isf
           shaders = list(Path('packs/starter/shaders').glob('*.fs'))
           print(f'found {len(shaders)} shaders')
-          assert len(shaders) >= 29, f'expected >= 29 shaders, got {len(shaders)}'
+          assert len(shaders) >= 30, f'expected >= 30 shaders, got {len(shaders)}'
           for f in shaders:
               s = parse_isf(f)
               print(f'  {f.stem}: {len(s.inputs)} inputs')
