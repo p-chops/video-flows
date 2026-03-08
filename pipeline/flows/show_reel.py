@@ -528,6 +528,125 @@ def show_reel_batch(
     return results
 
 
+# ── Batch single shows ───────────────────────────────────────────────────────
+
+@flow(name="batch-shows", log_prints=True,
+      task_runner=ConcurrentTaskRunner(max_workers=4))
+def batch_shows(
+    src: Path,
+    n_shows: int = 1,
+    duration: float = 60.0,
+    min_complexity: float = 0.4,
+    max_complexity: float = 0.9,
+    width: int = 640,
+    height: int = 480,
+    archetype: Optional[str] = None,
+    seed: Optional[int] = None,
+    max_reroll: int = 0,
+    motion_floor: float = 0.0,
+    cleanup: bool = True,
+    max_workers: int = 1,
+    cfg: Optional[Config] = None,
+) -> list[Path]:
+    """Generate shows — no transitions, no joining.
+
+    src: a directory of .mp4 files, or a single .mp4 file.
+         If a directory, one show is rendered per file.
+         If a single file, n_shows shows are rendered from it
+         (each with a different random seed).
+
+    n_shows:     number of shows per input file (default 1).
+    max_workers: parallel render threads (default 1 — sequential).
+
+    Each show is planned with random_recipe and rendered via brain_wipe.
+    Output files are named <stem>_show_NNN.mp4 in the output directory.
+    """
+    c = cfg or Config()
+    c.ensure_dirs()
+
+    # Resolve input files
+    if src.is_dir():
+        files = sorted(src.glob("*.mp4"))
+        if not files:
+            raise ValueError(f"No .mp4 files in {src}")
+    else:
+        files = [src]
+
+    rng = random.Random(seed)
+    batch_seed = seed or rng.randint(0, 2**31)
+    rng = random.Random(batch_seed)
+
+    # Build all jobs up front
+    jobs = []
+    for src_file in files:
+        for show_i in range(n_shows):
+            show_seed = rng.randint(0, 2**31)
+            complexity = rng.uniform(min_complexity, max_complexity)
+            show_complexity = max(0.4, min(0.55, complexity))
+
+            suffix = f"_{show_i:03d}" if n_shows > 1 else ""
+            out_path = c.output_dir / f"{src_file.stem}_show{suffix}.mp4"
+
+            recipe = random_recipe(
+                src=src_file,
+                complexity=show_complexity,
+                target_dur=duration,
+                use_generators=False,
+                n_segments=1,
+                use_transitions=False,
+                seed=show_seed,
+                archetype=archetype,
+                width=width,
+                height=height,
+                packs=c.packs,
+            )
+            _fixup_recipe_sources(recipe, duration, rng)
+            jobs.append((show_seed, show_complexity, out_path, recipe))
+
+    total = len(jobs)
+    print(f"═══ Batch Shows (seed={batch_seed}, {total} shows from {len(files)} file{'s' if len(files) > 1 else ''}) ═══")
+    print(f"    {duration:.0f}s each, complexity {min_complexity}–{max_complexity}")
+    print(f"    {width}×{height}")
+    if archetype:
+        print(f"    archetype: {archetype}")
+    print()
+
+    for i, (show_seed, show_complexity, out_path, recipe) in enumerate(jobs):
+        print(f"  show {i:03d} (seed={show_seed}, complexity={show_complexity:.2f}):")
+        for step in recipe.lanes[0].recipe:
+            print(f"    {step}")
+
+    max_workers = min(max_workers, total)
+
+    def _render_job(idx: int) -> Path:
+        show_seed, show_complexity, out_path, recipe = jobs[idx]
+        print(f"\n──── [{idx+1}/{total}] rendering "
+              f"(seed={show_seed}, complexity={show_complexity:.2f}) ────")
+        result = brain_wipe(recipe, output=out_path, cfg=c, cleanup=cleanup)
+        print(f"  show {idx:03d} complete: {result.name}")
+        return result
+
+    if max_workers <= 1:
+        results = [_render_job(i) for i in range(total)]
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {}
+            for i in range(total):
+                ctx = contextvars.copy_context()
+                futures[pool.submit(ctx.run, _render_job, i)] = i
+            results_map = {}
+            for future in as_completed(futures):
+                idx = futures[future]
+                results_map[idx] = future.result()
+            results = [results_map[i] for i in range(total)]
+
+    print(f"\n═══ Batch complete: {len(results)} shows in {c.output_dir}/ ═══")
+    for r in results:
+        print(f"  {r.name}")
+
+    return results
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def _add_plan_args(parser):
@@ -571,7 +690,7 @@ def main():
     import sys
 
     # If the first positional arg isn't a known subcommand, assume "run"
-    _COMMANDS = {"plan", "render", "run", "batch"}
+    _COMMANDS = {"plan", "render", "run", "batch", "shows"}
     if len(sys.argv) > 1 and sys.argv[1] not in _COMMANDS:
         sys.argv.insert(1, "run")
 
@@ -607,6 +726,31 @@ def main():
     p_batch = sub.add_parser("batch", help="Generate multiple random reels for curation")
     p_batch.add_argument("n_reels", type=int, help="Number of reels to generate")
     _add_plan_args(p_batch)
+
+    # shows — one show per input file (no transitions, no joining)
+    p_shows = sub.add_parser("shows", help="Batch shows (no reel)")
+    p_shows.add_argument("src", type=str,
+                         help="Source footage file or directory of .mp4 files")
+    p_shows.add_argument("-n", "--n-shows", type=int, default=1,
+                         help="Number of shows per input file (default: 1)")
+    p_shows.add_argument("--duration", type=float, default=60.0,
+                         help="Show duration in seconds (default: 60)")
+    p_shows.add_argument("--min-complexity", type=float, default=0.4)
+    p_shows.add_argument("--max-complexity", type=float, default=0.9)
+    p_shows.add_argument("--width", type=int, default=640)
+    p_shows.add_argument("--height", type=int, default=480)
+    p_shows.add_argument("--archetype", type=str, default=None,
+                         help="Force archetype (e.g. deep_time)")
+    p_shows.add_argument("--seed", type=int, default=None)
+    p_shows.add_argument("--max-reroll", type=int, default=0)
+    p_shows.add_argument("--motion-floor", type=float, default=0.0)
+    p_shows.add_argument("--no-cleanup", action="store_true")
+    p_shows.add_argument("--max-workers", type=int, default=1,
+                         help="Parallel render threads (default: 1)")
+    p_shows.add_argument("-o", "--output-dir", type=str, default=None,
+                         help="Output directory (default: config output_dir)")
+    p_shows.add_argument("--pack", action="append", dest="packs",
+                         help="Restrict to specific shader packs (repeatable)")
 
     args = parser.parse_args()
 
@@ -694,6 +838,27 @@ def main():
             motion_floor=args.motion_floor,
             max_reroll=args.max_reroll,
             cfg=Config(packs=packs),
+        )
+
+    elif args.command == "shows":
+        cfg = Config(packs=packs)
+        if args.output_dir:
+            cfg.output_dir = Path(args.output_dir)
+        batch_shows(
+            src=Path(args.src),
+            n_shows=args.n_shows,
+            duration=args.duration,
+            min_complexity=args.min_complexity,
+            max_complexity=args.max_complexity,
+            width=args.width,
+            height=args.height,
+            archetype=args.archetype,
+            seed=args.seed,
+            max_reroll=args.max_reroll,
+            motion_floor=args.motion_floor,
+            cleanup=not args.no_cleanup,
+            max_workers=args.max_workers,
+            cfg=cfg,
         )
 
 

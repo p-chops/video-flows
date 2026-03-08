@@ -7,6 +7,7 @@ def __getattr__(name):
         "show_reel": (".show_reel", "show_reel"),
         "show_reel_render": (".show_reel", "show_reel_render"),
         "show_reel_batch": (".show_reel", "show_reel_batch"),
+        "batch_shows": (".show_reel", "batch_shows"),
         "brain_wipe": (".brain_wipe", "brain_wipe"),
         "warp_chain": (".brain_wipe", "warp_chain"),
         "brain_wipe_render": (".brain_wipe", "brain_wipe_render"),

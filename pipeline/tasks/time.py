@@ -31,6 +31,72 @@ logger = logging.getLogger(__name__)
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+def _stack_and_free(frames: list[np.ndarray]) -> np.ndarray:
+    """Stack frames into (T, H, W, C) volume, freeing list entries as we go."""
+    T = len(frames)
+    vol = np.empty((T, *frames[0].shape), dtype=frames[0].dtype)
+    is_list = isinstance(frames, list)
+    for i in range(T):
+        vol[i] = frames[i]
+        if is_list:
+            frames[i] = None  # allow GC (only works on plain lists)
+    return vol
+
+
+# Peak RAM multipliers per effect (measured relative to one clip buffer).
+# Accounts for volumes, index arrays, intermediate copies, etc.
+_RAM_MULTIPLIERS: dict[str, float] = {
+    "temporalsort": 6.0,      # vol + int32 order (~1.3×) + per-channel copy + compensate
+    "temporalmorph": 4.0,     # vol + padded + result
+    "temporalfft": 5.0,       # vol + complex128 FFT
+    "temporalequalize": 4.0,
+    "temporaldisplace": 4.0,
+    "spectralremix": 5.0,
+    "phasescramble": 5.0,
+    "axisswap": 3.0,
+    "datamosh": 4.0,          # optical flow buffers
+    "flowwarp": 4.0,
+}
+_DEFAULT_RAM_MULTIPLIER = 2.5
+
+
+def _available_ram_mb() -> int:
+    """Return available system RAM in MB (Linux/macOS)."""
+    try:
+        import shutil
+        _, _, free = shutil.disk_usage("/")  # noqa: not what we want
+    except Exception:
+        pass
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except FileNotFoundError:
+        pass
+    try:
+        import subprocess
+        out = subprocess.check_output(["sysctl", "-n", "hw.memsize"],
+                                      stderr=subprocess.DEVNULL)
+        # macOS: total memory (no easy "available" via sysctl)
+        return int(out.strip()) // (1024 * 1024) // 2  # conservative: assume half
+    except Exception:
+        pass
+    return 16_000  # fallback: assume 16 GB
+
+
+def _estimate_peak_mb(n_frames: int, height: int, width: int, steps: list) -> float:
+    """Estimate peak RAM in MB for a fused time chain."""
+    one_buffer_mb = n_frames * height * width * 3 / 1e6
+    # Find the most expensive effect in the chain
+    max_mult = _DEFAULT_RAM_MULTIPLIER
+    for step, _seed in steps:
+        key = type(step).__name__.replace("Step", "").lower()
+        mult = _RAM_MULTIPLIERS.get(key, _DEFAULT_RAM_MULTIPLIER)
+        max_mult = max(max_mult, mult)
+    return one_buffer_mb * max_mult
+
+
 def _generate_playhead_curve(
     n_frames: int,
     fps: float,
@@ -1233,7 +1299,7 @@ def _process_temporal_sort(
     n = len(frames)
     h, w = frames[0].shape[:2]
 
-    vol = np.stack(frames, axis=0)  # (T, H, W, 3)
+    vol = _stack_and_free(frames)  # (T, H, W, 3)
 
     if mode == "luminance":
         key = (0.299 * vol[:, :, :, 0].astype(np.float32)
@@ -1245,29 +1311,33 @@ def _process_temporal_sort(
     else:
         key = vol[:, :, :, 0].astype(np.float32)
 
-    order = np.argsort(key, axis=0)
+    order = np.argsort(key, axis=0).astype(np.int32)
+    del key
     if direction == "descending":
         order = order[::-1]
 
-    sorted_vol = np.empty_like(vol)
     for ch in range(3):
-        channel = vol[:, :, :, ch]
-        sorted_vol[:, :, :, ch] = np.take_along_axis(channel, order, axis=0)
+        channel = vol[:, :, :, ch].copy()  # (T, H, W) — 1/3 of vol
+        vol[:, :, :, ch] = np.take_along_axis(channel, order, axis=0)
+        del channel
+    del order
 
     if compensate:
-        # Per-frame mean luminance of the sorted output
-        luma = (0.299 * sorted_vol[:, :, :, 0].astype(np.float32)
-                + 0.587 * sorted_vol[:, :, :, 1].astype(np.float32)
-                + 0.114 * sorted_vol[:, :, :, 2].astype(np.float32))
+        # Compute per-frame mean luminance
+        luma = (0.299 * vol[:, :, :, 0].astype(np.float32)
+                + 0.587 * vol[:, :, :, 1].astype(np.float32)
+                + 0.114 * vol[:, :, :, 2].astype(np.float32))
         frame_means = luma.mean(axis=(1, 2))  # (T,)
+        del luma
         target = frame_means.mean()
         if target > 1.0:
             scalars = np.clip(target / np.maximum(frame_means, 1.0), 0.5, 2.0)
-            sorted_f = sorted_vol.astype(np.float32)
-            sorted_f *= scalars[:, np.newaxis, np.newaxis, np.newaxis]
-            sorted_vol = np.clip(sorted_f, 0, 255).astype(np.uint8)
+            for t in range(len(vol)):
+                frame_f = vol[t].astype(np.float32)
+                frame_f *= scalars[t]
+                vol[t] = np.clip(frame_f, 0, 255).astype(np.uint8)
 
-    return [sorted_vol[i] for i in range(n)]
+    return [vol[i] for i in range(len(vol))]
 
 
 @task(name="temporal-sort", tags=["ram-heavy"])
@@ -1346,7 +1416,7 @@ def _process_temporal_fft(
         return list(frames)
 
     # Stack to (T, H, W, 3) float32 volume
-    vol = np.stack(frames, axis=0).astype(np.float32)
+    vol = _stack_and_free(frames).astype(np.float32)
 
     # FFT along time axis (axis=0) — per-pixel, per-channel
     spectrum = np.fft.rfft(vol, axis=0)  # (T//2+1, H, W, 3) complex
@@ -1455,7 +1525,7 @@ def _process_temporal_gradient(
     if n < order + 1:
         return list(frames)
 
-    vol = np.stack(frames, axis=0).astype(np.float32)
+    vol = _stack_and_free(frames).astype(np.float32)
 
     # np.diff along time axis, repeated for higher orders
     diff = vol
@@ -1533,7 +1603,7 @@ def _process_axis_swap(
         return list(frames)
 
     H, W = frames[0].shape[:2]
-    vol = np.stack(frames, axis=0)  # (T, H, W, 3) uint8
+    vol = _stack_and_free(frames)  # (T, H, W, 3) uint8
     T = n
 
     output = np.empty_like(vol)  # (T, H, W, 3)
@@ -1581,7 +1651,7 @@ def _process_temporal_morph(
     if n < 3:
         return list(frames)
 
-    vol = np.stack(frames, axis=0)  # (T, H, W, 3) uint8
+    vol = _stack_and_free(frames)  # (T, H, W, 3) uint8
     T = vol.shape[0]
     window = max(3, window | 1)  # force odd
     window = min(window, T)
@@ -1596,12 +1666,20 @@ def _process_temporal_morph(
 
     if operation == "dilate":
         result = _sliding_op(vol, np.max)
+        del vol
     elif operation == "erode":
         result = _sliding_op(vol, np.min)
+        del vol
     elif operation == "open":
-        result = _sliding_op(_sliding_op(vol, np.min), np.max)
+        eroded = _sliding_op(vol, np.min)
+        del vol
+        result = _sliding_op(eroded, np.max)
+        del eroded
     elif operation == "close":
-        result = _sliding_op(_sliding_op(vol, np.max), np.min)
+        dilated = _sliding_op(vol, np.max)
+        del vol
+        result = _sliding_op(dilated, np.min)
+        del dilated
     else:
         result = vol
 
@@ -1629,7 +1707,7 @@ def _process_depth_slice(
     if n < 2:
         return list(frames)
 
-    vol = np.stack(frames, axis=0)  # (T, H, W, 3)
+    vol = _stack_and_free(frames)  # (T, H, W, 3)
     T, H, W = vol.shape[:3]
     output = np.empty_like(vol)
 
@@ -1675,7 +1753,7 @@ def _process_temporal_equalize(
     if n < 3:
         return list(frames)
 
-    vol = np.stack(frames, axis=0).astype(np.float32)  # (T, H, W, 3)
+    vol = _stack_and_free(frames).astype(np.float32)  # (T, H, W, 3)
     T = vol.shape[0]
 
     order = np.argsort(vol, axis=0)
@@ -1709,7 +1787,7 @@ def _process_temporal_displace(
     if n < 3:
         return list(frames)
 
-    vol = np.stack(frames, axis=0).astype(np.float32)  # (T, H, W, 3)
+    vol = _stack_and_free(frames).astype(np.float32)  # (T, H, W, 3)
     T, H, W = vol.shape[:3]
 
     ch_map = {"r": 0, "g": 1, "b": 2}
@@ -1755,7 +1833,7 @@ def _process_spectral_remix(
     if n < 4:
         return list(frames)
 
-    vol = np.stack(frames, axis=0).astype(np.float32)
+    vol = _stack_and_free(frames).astype(np.float32)
     spectrum = np.fft.rfft(vol, axis=0)
     dc = spectrum[0:1].copy()
 
@@ -1810,7 +1888,7 @@ def _process_phase_scramble(
         return list(frames)
 
     rng = np.random.default_rng(seed)
-    vol = np.stack(frames, axis=0).astype(np.float32)
+    vol = _stack_and_free(frames).astype(np.float32)
     spectrum = np.fft.rfft(vol, axis=0)
 
     magnitudes = np.abs(spectrum)
@@ -2568,6 +2646,24 @@ def fused_time_chain(
     info = probe(src, c)
     fps = info.fps
 
+    # Pre-flight RAM check: estimate peak usage and compare to available memory
+    n_frames = int(info.duration * fps)
+    peak_mb = _estimate_peak_mb(n_frames, info.height, info.width, steps)
+    avail_mb = _available_ram_mb()
+    headroom_mb = 2048  # reserve 2 GB for OS + other apps
+    if peak_mb > avail_mb - headroom_mb:
+        effect_names = ", ".join(
+            type(s).__name__.replace("Step", "") for s, _ in steps
+        )
+        raise MemoryError(
+            f"Estimated peak RAM ~{peak_mb:.0f} MB for {n_frames} frames "
+            f"at {info.width}x{info.height} ({effect_names}), "
+            f"but only {avail_mb:.0f} MB available "
+            f"(need {headroom_mb} MB headroom). "
+            f"Try shorter clips, lower resolution, or fewer concurrent effects."
+        )
+    print(f"RAM estimate: ~{peak_mb:.0f} MB peak, {avail_mb:.0f} MB available")
+
     frames = _load_frames(src, c)
     n_effects = len(steps)
     logger.info("fused_time_chain: %d effects on %d frames (%.1fs @ %.0ffps)",
@@ -2587,6 +2683,7 @@ def fused_time_chain(
             # iterations frames is a plain list, cleanup() is a no-op check.
             if isinstance(frames, FrameBuffer):
                 frames.cleanup()
+            del frames  # explicit free before reassignment
             frames = result  # now list[np.ndarray]
 
             step_elapsed = _time.monotonic() - step_t0

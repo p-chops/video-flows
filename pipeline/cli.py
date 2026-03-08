@@ -263,6 +263,126 @@ def _handle_preset(args, src, cfg):
     brain_wipe(recipe, output=args.output, cfg=cfg)
 
 
+# ── vf shows ─────────────────────────────────────────────────────────────────
+
+def _add_shows_parser(sub):
+    p = sub.add_parser("shows", help="One show per input file (batch, no reel)")
+    p.add_argument("src", type=str,
+                   help="Source footage file or directory of .mp4 files")
+    p.add_argument("-n", "--n-shows", type=int, default=1,
+                   help="Number of shows per input file (default: 1)")
+    p.add_argument("--duration", type=float, default=60.0,
+                   help="Show duration in seconds (default: 60)")
+    p.add_argument("--min-complexity", type=float, default=0.4)
+    p.add_argument("--max-complexity", type=float, default=0.9)
+    p.add_argument("--width", type=int, default=640)
+    p.add_argument("--height", type=int, default=480)
+    p.add_argument("--archetype", type=str, default=None,
+                   help="Force archetype (e.g. deep_time)")
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--max-reroll", type=int, default=0)
+    p.add_argument("--motion-floor", type=float, default=0.0)
+    p.add_argument("--no-cleanup", action="store_true")
+    p.add_argument("--max-workers", type=int, default=1,
+                   help="Parallel render threads (default: 1 — sequential)")
+    p.add_argument("-o", "--output-dir", type=Path, default=None,
+                   help="Output directory (default: config output_dir)")
+    p.add_argument("--pack", action="append", dest="packs")
+    p.set_defaults(func=_handle_shows)
+
+
+def _handle_shows(args):
+    from pipeline.config import Config
+    from pipeline.flows.show_reel import batch_shows
+
+    cfg = Config(packs=getattr(args, "packs", None))
+    if args.output_dir:
+        cfg.output_dir = args.output_dir
+    batch_shows(
+        src=Path(args.src),
+        n_shows=args.n_shows,
+        duration=args.duration,
+        min_complexity=args.min_complexity,
+        max_complexity=args.max_complexity,
+        width=args.width,
+        height=args.height,
+        archetype=args.archetype,
+        seed=args.seed,
+        max_reroll=args.max_reroll,
+        motion_floor=args.motion_floor,
+        max_workers=args.max_workers,
+        cleanup=not args.no_cleanup,
+        cfg=cfg,
+    )
+
+
+# ── vf join ──────────────────────────────────────────────────────────────────
+
+def _add_join_parser(sub):
+    p = sub.add_parser("join", help="Join curated clips with transitions")
+    p.add_argument("src", type=str,
+                   help="Directory of .mp4 clips (or a text file listing paths)")
+    p.add_argument("-o", "--output", type=Path, default=None,
+                   help="Output path (default: output/joined_<seed>.mp4)")
+    p.add_argument("--transition", type=str, default="random",
+                   help="Transition type: crossfade, luma_wipe, whip_pan, "
+                        "static_burst, flash, slide, dissolve, zoom, pixelate, "
+                        "melt, interlace, squeeze, random (default: random)")
+    p.add_argument("--transition-dur", type=float, default=0.5,
+                   help="Transition duration in seconds (default: 0.5)")
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--shuffle", action="store_true",
+                   help="Shuffle clip order before joining")
+    p.set_defaults(func=_handle_join)
+
+
+def _handle_join(args):
+    import random as _random
+    from pipeline.config import Config
+    from pipeline.tasks.transition import transition_sequence
+
+    cfg = Config()
+    cfg.ensure_dirs()
+
+    src = Path(args.src)
+    rng = _random.Random(args.seed)
+    seed = args.seed or rng.randint(0, 2**31)
+
+    # Resolve clip list
+    if src.is_dir():
+        clips = sorted(src.glob("*.mp4"))
+    elif src.suffix == ".txt":
+        clips = [Path(line.strip()) for line in src.read_text().splitlines()
+                 if line.strip() and not line.strip().startswith("#")]
+    else:
+        print(f"Error: {src} is not a directory or .txt playlist")
+        sys.exit(1)
+
+    if len(clips) < 2:
+        print(f"Error: need at least 2 clips to join, found {len(clips)}")
+        sys.exit(1)
+
+    if args.shuffle:
+        _random.Random(seed).shuffle(clips)
+
+    out = args.output or cfg.output_dir / f"joined_{seed}.mp4"
+
+    print(f"Joining {len(clips)} clips with {args.transition} transitions "
+          f"({args.transition_dur}s)")
+    for i, c in enumerate(clips):
+        print(f"  {i+1:3d}. {c.name}")
+
+    transition_sequence(
+        clips, out,
+        transition_type=args.transition,
+        duration=args.transition_dur,
+        seed=seed,
+        cfg=cfg,
+    )
+
+    print(f"\nOutput: {out}")
+
+
 # ── vf stack ─────────────────────────────────────────────────────────────────
 
 def _add_stack_parser(sub):
@@ -598,6 +718,8 @@ def main():
 
     _add_reel_parsers(sub)
     _add_show_parser(sub)
+    _add_shows_parser(sub)
+    _add_join_parser(sub)
     _add_stack_parser(sub)
     _add_pack_parsers(sub)
 
