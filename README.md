@@ -64,7 +64,7 @@ See [PACKS.md](PACKS.md) for the full guide on creating and curating packs.
 
 ## CLI
 
-The `vf` command is the main entry point. Four subcommands: `reel`, `show`, `stack`, `pack`.
+The `vf` command is the main entry point. Six subcommands: `reel`, `show`, `shows`, `join`, `stack`, `pack`.
 
 ### Show reels
 
@@ -119,6 +119,32 @@ vf show input/footage.mp4 --preset stooges --seed 42
 vf show --archetype cascade --complexity 0.7 --duration 15 --seed 42
 ```
 
+### Batch shows (generate → curate → join)
+
+Generate individual clips for curation, then join the keepers into a reel:
+
+```bash
+# Generate 10 short deep_time clips from source footage
+vf shows input/footage.mp4 -n 10 --duration 10 --archetype deep_time
+
+# Output to a specific directory
+vf shows input/footage.mp4 -n 20 --duration 8 -o curated/
+
+# Watch, delete duds, then join survivors with random transitions
+vf join curated/ -o final_reel.mp4 --transition random --transition-dur 0.5
+
+# Join with a specific transition type
+vf join curated/ -o final_reel.mp4 --transition crossfade
+
+# Shuffle clip order before joining
+vf join curated/ --shuffle --seed 42
+
+# Join clips listed in a text file (one path per line)
+vf join playlist.txt -o final_reel.mp4
+```
+
+`vf shows` defaults to sequential rendering (`--max-workers 1`). Increase for parallel rendering if you have RAM headroom.
+
 ### Named stacks
 
 Run a specific shader stack by name via `vf stack`:
@@ -163,7 +189,7 @@ vf pack evolve packs/my_effects/ --candidates 2000 -n 20 --seed 42
 - **Time effects** — 27 temporal manipulations (scrub, drift, ping-pong, echo, slit scan, temporal sort, feedback transform, datamosh, and more)
 - **Codec crush** — intentional quality destruction via fixed-QP encoding (x264, mpeg2, mpeg4)
 - **Compositing** — multi-lane blend, masked composite, picture-in-picture, chromakey
-- **Transitions** — crossfade, luma wipe, whip pan, static burst, flash
+- **Transitions** — crossfade, luma wipe, whip pan, static burst, flash, slide, dissolve, zoom, pixelate, melt, interlace, squeeze
 
 ### Recipe system
 

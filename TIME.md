@@ -23,6 +23,8 @@ Each effect uses a memory strategy appropriate to its access pattern:
 
 `FrameBuffer` manages memory automatically — small clips stay in RAM, large ones spill to `np.memmap` temp files, and clips exceeding `max_ram_mb` are rejected before decoding starts.
 
+A **pre-flight RAM guard** in `fused_time_chain` estimates peak memory before processing begins, using per-effect multipliers (e.g., temporal_sort = 6x, temporal_fft = 5x). If the estimate exceeds available RAM minus a 2 GB headroom, a `MemoryError` is raised before any work starts. Effects also use `_stack_and_free()` to build contiguous numpy volumes while freeing the source frame list as it goes, reducing peak memory during the decode-to-volume transition.
+
 ### Recipe integration
 
 The `random_recipe()` generator picks time effects from a weighted pool. Each archetype uses them differently:
