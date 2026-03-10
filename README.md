@@ -246,3 +246,7 @@ Without a server, everything still works — you just don't get the dashboard.
 ## License
 
 MIT License. See [LICENSE](LICENSE).
+
+## Note on use of AI
+
+This codebase was developed using Claude Code and Opus 4.6.
